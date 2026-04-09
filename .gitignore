@@ -37,3 +37,4 @@ CLAUDE.local.md
 # === Logs ===
 *.log
 npm-debug.log*
+deploy-keypair.json
