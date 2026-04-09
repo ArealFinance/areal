@@ -1,0 +1,39 @@
+# === Build artifacts ===
+target/
+dist/
+build/
+.svelte-kit/
+
+# === Dependencies ===
+node_modules/
+
+# === Environment & secrets ===
+.env
+.env.*
+*.pem
+*.key
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Archive (old Anchor code backup — DO NOT INCLUDE) ===
+blockchain.zip
+
+# === Claude local config (per-machine) ===
+CLAUDE.local.md
+.claude/settings.local.json
+
+# === Rust ===
+*.so
+*.dylib
+
+# === Logs ===
+*.log
+npm-debug.log*
