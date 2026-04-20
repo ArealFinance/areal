@@ -38,3 +38,15 @@ CLAUDE.local.md
 *.log
 npm-debug.log*
 deploy-keypair.json
+
+# Vanity keypairs (private keys)
+keys/
+
+# === Merkle Publisher bot runtime state ===
+bots/merkle-publisher/data/
+bots/merkle-publisher/proofs/
+bots/merkle-publisher/local-mock-keypair.json
+bots/merkle-publisher/*.db
+bots/merkle-publisher/*.db-journal
+bots/merkle-publisher/*.db-wal
+bots/merkle-publisher/*.db-shm
