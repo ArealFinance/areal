@@ -91,15 +91,7 @@ areal/
 | Node.js | ≥ 22.17.0 |
 | `git-filter-repo` | optional, for monorepo splits |
 
-Contracts depend on the [Arlex](https://github.com/) framework. Clone it adjacent to this repo so the relative paths in `contracts/*/Cargo.toml` resolve:
-
-```
-~/Documents/
-├── areal/                      ← this repo
-└── Solana/arlex/framework/     ← Arlex framework
-```
-
-This will be replaced with a git submodule in a future revision.
+Contracts depend on the [Arlex](https://github.com/ArealFinance/arlex) framework (also hosted under the Areal Finance org). Cargo fetches it automatically from GitHub on first build — no separate clone required.
 
 ### Platform-tools workaround
 
