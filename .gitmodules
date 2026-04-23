@@ -1,12 +1,12 @@
 [submodule "docs"]
 	path = docs
-	url = git@github.com:ArealFinance/docs.git
+	url = https://github.com/ArealFinance/docs.git
 [submodule "contracts"]
 	path = contracts
-	url = git@github.com:ArealFinance/contracts.git
+	url = https://github.com/ArealFinance/contracts.git
 [submodule "dashboard"]
 	path = dashboard
-	url = git@github.com:ArealFinance/dashboard.git
+	url = https://github.com/ArealFinance/dashboard.git
 [submodule "bots"]
 	path = bots
-	url = git@github.com:ArealFinance/bots.git
+	url = https://github.com/ArealFinance/bots.git
