@@ -1,0 +1,23 @@
+{
+  "name": "areal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Areal Finance protocol — Solana on-chain programs, admin dashboard, and off-chain services",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ArealFinance/areal.git"
+  },
+  "workspaces": [
+    "dashboard",
+    "bots/*"
+  ],
+  "scripts": {
+    "dashboard:dev": "npm -w areal-ot-dashboard run dev",
+    "dashboard:build": "npm -w areal-ot-dashboard run build",
+    "dashboard:check": "npm -w areal-ot-dashboard run check",
+    "dashboard:deploy": "bash scripts/deploy-dashboard.sh",
+    "bot:merkle": "npm -w merkle-publisher run start",
+    "bot:rebalancer": "npm -w pool-rebalancer run start"
+  }
+}
