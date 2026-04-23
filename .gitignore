@@ -10,8 +10,13 @@ node_modules/
 # === Environment & secrets ===
 .env
 .env.*
+!.env.example
 *.pem
 *.key
+
+# === Internal planning (tracked separately in ArealFinance/areal-planning) ===
+plan/
+MIGRATION-PLAN.md
 
 # === OS files ===
 .DS_Store
