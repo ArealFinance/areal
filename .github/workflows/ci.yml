@@ -7,34 +7,19 @@ on:
     branches: [main]
 
 jobs:
-  dashboard:
-    name: Dashboard (svelte-check + build)
+  submodules:
+    name: Submodules resolve
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-      - name: Install
-        run: npm ci
-      - name: svelte-check
-        run: npm run dashboard:check
-      - name: build
-        run: npm run dashboard:build
-
-  merkle-publisher:
-    name: Merkle Publisher (typecheck + tests)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install
-        run: npm ci
-      - name: typecheck
-        run: npm -w merkle-publisher run build
-      - name: tests
-        run: npm -w merkle-publisher test
+          submodules: recursive
+      - name: Show submodule status
+        run: git submodule status
+      - name: Show structure
+        run: |
+          echo "--- .gitmodules ---"
+          cat .gitmodules
+          echo ""
+          echo "--- tree depth 2 ---"
+          find . -maxdepth 2 -type d -not -path '*/\.*' | sort
