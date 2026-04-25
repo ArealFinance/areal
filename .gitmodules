@@ -10,3 +10,6 @@
 [submodule "bots"]
 	path = bots
 	url = https://github.com/ArealFinance/bots.git
+[submodule "app"]
+	path = app
+	url = https://github.com/ArealFinance/app.git
