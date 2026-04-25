@@ -56,6 +56,18 @@ Also:
 | `native-dex` | 12 | StandardCurve + concentrated-liquidity AMM |
 | `yield-distribution` | 10 | Merkle-proof claims, USDC → RWT conversion |
 
+#### Deployed program IDs (test-validator)
+
+| Program | Address |
+|---|---|
+| `ownership-token` | `oWnqbNwmEdjNS5KVbxz8xeuGNjKMd1aiNF89d7qdARL` |
+| `futarchy` | `FUTsbsdyJmEWa5LSYHWXMr9hQFyVsrJ1agGvRQGR1ARL` |
+| `rwt-engine` | `RWT9hgbjHQDj98xP7FYsT5QYp5X32XyK6QfMRmFtARL` |
+| `native-dex` | `DEX8LmvJpjefPS1cGS9zWB9ybxN24vNjTTrusBeqyARL` |
+| `yield-distribution` | `YLD9EBikcTmVCnVzdx6vuNajrDkp8tyCAgZrqTwmMXF` |
+
+RPC: [`http://rpc.areal.finance`](http://rpc.areal.finance) (proxies to a local test-validator).
+
 ### Off-chain services (in `bots/`)
 
 | Service | State |
