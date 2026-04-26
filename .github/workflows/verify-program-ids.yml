@@ -1,0 +1,24 @@
+name: Verify Program IDs
+
+# R12 from Layer 8 decisions: every push must re-derive each `*_PROGRAM_ID`
+# constant from its canonical base58 vanity address and assert byte-equality
+# against every shadow copy across the contracts workspace. Drift between
+# crates would silently break CPI dispatch (mismatched program IDs revert as
+# `InvalidArgument`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify-program-ids:
+    name: verify-program-ids.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Run verify-program-ids.sh
+        run: bash scripts/verify-program-ids.sh
