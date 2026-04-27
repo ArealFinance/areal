@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "allowSyntheticDefaultImports": true,
+    "noEmit": true,
+    "types": ["node"],
+    "typeRoots": ["../../bots/node_modules/@types"],
+    "baseUrl": "../..",
+    "paths": {
+      "@solana/web3.js": ["bots/node_modules/@solana/web3.js"]
+    }
+  },
+  "include": ["./*.ts"]
+}

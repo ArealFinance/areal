@@ -47,6 +47,12 @@ deploy-keypair.json
 # Vanity keypairs (private keys)
 keys/
 
+# === E2E bootstrap artifacts (Layer 9 Substep 12) ===
+data/
+bots/*/data/
+bots/*/.env
+bots/merkle-publisher/local-mock-keypair.json
+
 # === Merkle Publisher bot runtime state ===
 bots/merkle-publisher/data/
 bots/merkle-publisher/proofs/
