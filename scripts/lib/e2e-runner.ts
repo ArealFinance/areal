@@ -33,7 +33,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Keypair, PublicKey } from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -85,11 +85,6 @@ function loadBootstrap(path: string): BootstrapState {
     throw new Error(`bootstrap artifact missing at ${path} — run e2e-bootstrap.sh first`);
   }
   return JSON.parse(readFileSync(path, 'utf8')) as BootstrapState;
-}
-
-function loadKeypair(path: string): Keypair {
-  const raw = JSON.parse(readFileSync(path, 'utf8')) as number[];
-  return Keypair.fromSecretKey(Uint8Array.from(raw));
 }
 
 // --------------------------------------------------------------------------
@@ -189,7 +184,15 @@ async function runRevenue(state: BootstrapState): Promise<FlowResult> {
     return { flow: 'revenue', status: 'skipped', reason: 'no OTs in bootstrap' };
   }
   // Touch deployer to surface a config error early — every flow needs it.
-  loadKeypair(state.deployer_keypair_path);
+  // Sec L-3: existsSync only — avoid loading the keypair into V8 heap when
+  // we don't actually use the secret bytes for this gate-check.
+  if (!existsSync(state.deployer_keypair_path)) {
+    return {
+      flow: 'revenue',
+      status: 'skipped',
+      reason: `deployer keypair missing at ${state.deployer_keypair_path}`,
+    };
+  }
   return {
     flow: 'revenue',
     status: 'skipped',
