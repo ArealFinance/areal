@@ -854,17 +854,23 @@ async function phaseNexus(
   deployer: Keypair,
   art: Artifact,
 ): Promise<void> {
-  log('phase-e', 'initializing DEX LiquidityNexus (Layer 9 — best-effort)');
+  log('phase-e', 'initializing DEX LiquidityNexus (Layer 10 — required)');
 
   const dexProgramId = new PublicKey(art.programs.native_dex);
   const dexIdl = loadIdl('native-dex');
-  const skipped = art.init_skipped ?? [];
 
+  // Layer 10 Substep 1 — R57 closure (2026-04-27): the dashboard IDL was
+  // regenerated to include the 9 Nexus instructions, so the previous
+  // best-effort `ixExists` skip is gone. If `initialize_nexus` is still
+  // missing here, the IDL on disk is stale — fail LOUDLY rather than
+  // silently recording a skip and letting downstream phases run against a
+  // half-bootstrapped Nexus.
   if (!ixExists(dexIdl, 'initialize_nexus')) {
-    warn('phase-e', 'DEX IDL missing initialize_nexus; skipping (Layer 9 IDL not regenerated yet)');
-    skipped.push('DEX::initialize_nexus');
-    art.init_skipped = skipped;
-    return;
+    throw new Error(
+      'DEX IDL missing initialize_nexus — IDL regeneration (R57) is incomplete. ' +
+        'Re-run `arlex-cli idl native-dex` and rebuild the dashboard before ' +
+        'continuing the bootstrap.',
+    );
   }
 
   const [nexusPda] = findPda([Buffer.from('liquidity_nexus')], dexProgramId);

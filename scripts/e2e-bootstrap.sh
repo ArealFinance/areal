@@ -290,9 +290,18 @@ build_one() {
     cd "$ROOT_DIR/contracts/$crate"
     # R20 tripwire: yield-distribution refuses to build with the devnet
     # placeholder RWT/USDC mint bytes unless `dev-placeholder-mints` is
-    # enabled. Mainnet runbook drops this flag after replacing the bytes.
+    # enabled. Mainnet runbook drops this flag after replacing the bytes
+    # via scripts/migrate-mints.sh. We auto-detect which mode applies by
+    # checking the data/r20-migrated.json sentinel: present = real bytes
+    # were pinned, build without the flag so the tripwire verifies the
+    # swap; absent = placeholder build, pass the flag.
     if [[ "$crate" == "yield-distribution" ]]; then
-      cargo build-sbf --features dev-placeholder-mints >>"$LOG_FILE" 2>&1
+      if [[ -f "$ROOT_DIR/data/r20-migrated.json" ]]; then
+        log "  R20: data/r20-migrated.json present → building yield-distribution WITHOUT dev-placeholder-mints"
+        cargo build-sbf >>"$LOG_FILE" 2>&1
+      else
+        cargo build-sbf --features dev-placeholder-mints >>"$LOG_FILE" 2>&1
+      fi
     else
       cargo build-sbf >>"$LOG_FILE" 2>&1
     fi
