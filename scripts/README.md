@@ -23,7 +23,7 @@ working directory is the repo root unless noted otherwise.
   intent without claiming parity.
 - **R-T5** — wire dashboard-side test coverage for the Layer 9 LP-fee
   claim modal once the on-chain handler stabilises (post-R57 + post-fee-share
-  shape decision in `plan/layer-09-decisions.md`).
+  shape decision recorded in the internal R-ticket log).
 
 ## Vanity keypairs
 
@@ -176,3 +176,38 @@ with "gated on R20" before attempting any submit.
 
 Pre-existing — builds the dashboard and pushes to the static host. Independent
 of the chain bootstrap.
+
+## Substep 14 closure summary
+
+| R-ticket | Status | Mechanism |
+|---|---|---|
+| **R-58** | CLOSED | `scripts/e2e-runner.sh` + `scripts/lib/e2e-runner.ts` ship with the **mandatory manual-run-hint pattern** (per SD-33 / architect AD-1). Every scenario fixture emits a CLI-invokable command line with bootstrap-artifact-resolved env vars; the runner does NOT spawn subprocesses. Operators run the hint by hand for cleaner handoffs across scenario-specific fixtures. |
+| **R-59** | CLOSED | `bots/.e2e/parity-tx-builders.test.ts` ships an **inlined byte-equivalent mirror** of the dashboard's `layer8-builders.ts` ix-construction logic (per SD-34 / architect AD-1). Asserts crank-side ↔ dashboard-side `keys[].pubkey + isSigner + isWritable + data` byte-equal. Drift mitigation = R-62 (CI fingerprint or runtime-agnostic refactor). |
+| **R-60** | CLOSED | `assertCrankBalance` lifted into `@areal/bots-shared::preflight`. All 4 cranks call it before the first submit per cycle; `low_sol` skips return cleanly with structured taxonomy instead of failing inside `sendAndConfirmTransaction`. |
+
+### Bootstrap secrets file split (SD-32)
+
+Two-file pattern shipped Substep 12 (security M-2):
+
+- `data/e2e-bootstrap.json` — **public**. Contains pubkeys, vanity IDs,
+  deployment metadata, R57/R20 gate skip lists. Reproducibility = this
+  file alone.
+- `data/e2e-bootstrap.secrets.json` — **gitignored**. Contains keypair
+  paths and signing-material references. Required only when running the
+  cranks / e2e-runner, not for analysing past bootstrap output.
+
+The meta-repo `.gitignore` covers both `data/*.secrets.json` and
+`cu-profile-*.json` (the latter contains synthetic-skeleton entries today
+per R-63 + reflects local validator state). R-69 tracks moving the last
+public-side `deployer_keypair_path` field into secrets-only on next
+schema bump.
+
+### CU profile synthetic-skeleton caveat (R-63)
+
+`cu-profile-*.json` covers ix the bootstrap can fully exercise. For ix
+gated on R20 + R57 (the 9 Nexus ix + LH-drain), the harness emits
+**synthetic skeleton entries** so the JSON shape is uniform but the
+numbers are placeholders. R-63 adds a `synthetic_skeleton: true` flag to
+distinguish synthetic from live entries; consumers MUST surface that flag
+when rendering tables. The R46 stack-overflow detector (SD-30) ships with
+INCONCLUSIVE verdict until the first live R20+R57 run lands in Layer 10.

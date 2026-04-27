@@ -8,6 +8,8 @@ This repository is a **meta-repo** that aggregates the five components of Areal 
 - **Admin panel:** https://panel.areal.finance
 - **Twitter:** [@areal_finance](https://twitter.com/areal_finance)
 
+> **Layer 9 status (2026-04-27).** Layer 9 (Liquidity Nexus + protocol-owned liquidity) is **code-complete** and accepted across all 15 substeps. Mainnet deployment is gated on two external Layer 10 critical-path items: **R20** (RWT_MINT pin migration) and **R57** (dashboard IDL regen for the 9 new Nexus instructions). Layer 9 acceptance verdict: APPROVED with R20+R57 external. See [`docs.areal.finance/architecture/layer9-liquidity-nexus`](https://docs.areal.finance/architecture/layer9-liquidity-nexus) for the subsystem overview.
+
 ---
 
 ## Components
@@ -53,8 +55,8 @@ Also:
 | `ownership-token` | 8 | Tokenized ownership, revenue distribution, treasury |
 | `futarchy` | 8 | Per-OT governance via CPI proposals |
 | `rwt-engine` | 11 | Reward token minting, NAV bookkeeping, vault, DEX swaps |
-| `native-dex` | 12 | StandardCurve + concentrated-liquidity AMM |
-| `yield-distribution` | 10 | Merkle-proof claims, USDC → RWT conversion |
+| `native-dex` | 21 | StandardCurve + concentrated-liquidity AMM, **LiquidityNexus** (Layer 9) |
+| `yield-distribution` | 12 | Merkle-proof claims, USDC → RWT conversion, **LiquidityHolding atomic drain** (Layer 9) |
 
 #### Deployed program IDs (test-validator)
 
