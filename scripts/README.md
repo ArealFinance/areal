@@ -7,10 +7,23 @@ working directory is the repo root unless noted otherwise.
 |---|---|
 | `e2e-bootstrap.sh` | Single-command bootstrap from zero — provisions `solana-test-validator`, deploys the 5 programs at vanity IDs, runs on-chain init, generates bot keypairs + airdrops, renders bots' `.env` files. Layer 9 Substep 12. |
 | `verify-program-ids.sh` | Cross-checks every `*_PROGRAM_ID` constant pinned across crates against the canonical vanity base58. R12 from Layer 8 decisions. |
-| `cu-profile.sh` | R24 acceptance harness — captures live `computeUnitsConsumed` per ix and writes a P50/P95/max table into the internal CU-profile doc. Sources env from `data/e2e-bootstrap.env`. |
+| `cu-profile.sh` | R24 acceptance harness — captures live `computeUnitsConsumed` per ix and writes a P50/P95/max table into the internal CU-profile doc. Sources env from `data/e2e-bootstrap.env`. R46 best-effort grep for BPF stack overflows is bundled (SD-30). |
+| `e2e-runner.sh` | R-58 operator-driven Layer 9 scenario runner. Reads the bootstrap artifact, gate-checks (R20 / R57), and dispatches one full live-submit cycle per crank. |
 | `deploy-dashboard.sh` | Builds + deploys the SvelteKit dashboard. Independent of the chain bootstrap. |
-| `lib/bootstrap-init.ts` | On-chain init driver invoked by stage 6 of `e2e-bootstrap.sh`. Idempotent. Reads/writes `data/e2e-bootstrap.json`. |
+| `lib/bootstrap-init.ts` | On-chain init driver invoked by stage 6 of `e2e-bootstrap.sh`. Idempotent. Reads/writes `data/e2e-bootstrap.json` (+ `.secrets.json` per Substep 12 sec M-2). |
+| `lib/cu-profile.ts` | R24 + R46 live profiler — invoked by `cu-profile.sh`. |
+| `lib/e2e-runner.ts` | Tsx orchestrator behind `e2e-runner.sh`. |
 | `lib/render-env.ts` | Renders `bots/<bot>/.env` from `.env.example` templates + the artifact map. Never modifies templates. |
+
+### Layer 9 deferred follow-ups (Substep 14 closeout)
+
+- **R-T2** — extend `bots/.e2e/parity-tx-builders.test.ts` with a crank-side
+  builder for `withdraw_liquidity_holding` once R20 (RWT_MINT pin migration)
+  lands. Today only the dashboard owns that ix; the placeholder test asserts
+  intent without claiming parity.
+- **R-T5** — wire dashboard-side test coverage for the Layer 9 LP-fee
+  claim modal once the on-chain handler stabilises (post-R57 + post-fee-share
+  shape decision in `plan/layer-09-decisions.md`).
 
 ## Vanity keypairs
 
@@ -135,6 +148,29 @@ bash scripts/cu-profile.sh
 ```
 
 Without `E2E_BOOTSTRAP_DONE=1` it exits 0 with a "needs bootstrap" message.
+
+## e2e-runner.sh
+
+R-58 operator-driven Layer 9 scenario runner. Reads
+`data/e2e-bootstrap.json`, gate-checks (R20 / R57) and dispatches one
+full live-submit cycle per crank.
+
+```bash
+# Pick a scenario:
+bash scripts/e2e-runner.sh --scenario revenue-only
+bash scripts/e2e-runner.sh --scenario nexus-only   # gated on R57
+bash scripts/e2e-runner.sh --scenario lh-drain     # gated on R20
+bash scripts/e2e-runner.sh                         # full (default; degrades per-flow)
+```
+
+Exit codes: 0 (ok) / 1 (any flow errored) / 2 (scenario gated on unmet
+contract precondition). Writes a JSON artifact at
+`data/e2e-runner-<scenario>-<UTC>.json`.
+
+Gating reads `init_skipped[]` and `init_failed[]` from the bootstrap
+artifact — if `--scenario lh-drain` is requested while
+`initialize_liquidity_holding` is in `init_failed`, the runner exits 2
+with "gated on R20" before attempting any submit.
 
 ## deploy-dashboard.sh
 

@@ -46,36 +46,28 @@ done
 if (( ${#missing[@]} > 0 )); then
   echo "[cu-profile] env not set, skipping live profiling." >&2
   echo "             missing: ${missing[*]}" >&2
-  echo "             see plan/layer-08-cu-profile.md for the harness contract." >&2
+  echo "             see scripts/README.md for the harness contract." >&2
   exit 0
 fi
 
 if [[ "${E2E_BOOTSTRAP_DONE:-0}" != "1" ]]; then
   echo "[cu-profile] E2E_BOOTSTRAP_DONE not set — bootstrap required." >&2
-  echo "             Layer 9 polish ships scripts/e2e-bootstrap.sh; until then" >&2
-  echo "             the validator state must be seeded manually (see" >&2
-  echo "             bots/.e2e/README.md scenario list)." >&2
+  echo "             Run scripts/e2e-bootstrap.sh first to seed the localhost" >&2
+  echo "             validator state. See plan/layer-09-architecture.md §13." >&2
   exit 0
 fi
 
-# When the bootstrap lands, the loop below replaces this comment and submits
-# 10+ TXs per ix, parses computeUnitsConsumed from getTransaction, computes
-# P50 / P95, and appends the result table to plan/layer-08-cu-profile.md.
-#
-# Pseudocode:
-#
-#   for ix in claim_yd_for_treasury compound_yield claim_yield \
-#             convert_to_rwt:swap convert_to_rwt:mint convert_to_rwt:dual; do
-#     for i in $(seq 1 12); do
-#       sig=$(submit_tx "$ix" "$i")
-#       cu=$(solana confirm -v "$sig" 2>&1 | grep -oE 'consumed [0-9]+' | head -1)
-#       echo "$ix,$cu"
-#     done
-#   done | tee cu-runs.csv
-#
-#   python3 scripts/cu-profile-summarize.py cu-runs.csv \
-#     >> "$PLAN_FILE"
+# Layer 9 Substep 14: live harness wired. Reads the bootstrap artifact at
+# data/e2e-bootstrap.json (+ secrets file), submits each registered ix N
+# times, captures CU + log signatures, writes JSON to data/cu-profile-*.json,
+# and appends Markdown to plan/layer-08-cu-profile.md + plan/layer-09-cu-profile.md
+# (when the private docs repo is present).
+ARTIFACT="${E2E_BOOTSTRAP_ARTIFACT:-$ROOT_DIR/data/e2e-bootstrap.json}"
+ITERATIONS="${CU_PROFILE_ITERATIONS:-5}"
+OUTPUT_DIR="${CU_PROFILE_OUTPUT_DIR:-$ROOT_DIR/data}"
 
-echo "[cu-profile] OK: env present, bootstrap detected — but harness execution"
-echo "             is gated until Layer 9 polish lands the bootstrap script."
-echo "             see plan/layer-08-cu-profile.md §Methodology."
+cd "$ROOT_DIR"
+exec npx --prefix bots tsx scripts/lib/cu-profile.ts \
+  --artifact "$ARTIFACT" \
+  --iterations "$ITERATIONS" \
+  --output-dir "$OUTPUT_DIR"

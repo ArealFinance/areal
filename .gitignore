@@ -49,6 +49,9 @@ keys/
 
 # === E2E bootstrap artifacts (Layer 9 Substep 12) ===
 data/
+data/e2e-bootstrap.secrets.json
+data/cu-profile-*.json
+data/e2e-runner-*.json
 bots/*/data/
 bots/*/.env
 bots/merkle-publisher/local-mock-keypair.json

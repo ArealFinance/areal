@@ -64,6 +64,53 @@ const SYSTEM_PROGRAM_ID = new PublicKey('11111111111111111111111111111111');
 const DEFAULT_ARTIFACT_PATH = join(REPO_ROOT, 'data', 'e2e-bootstrap.json');
 const DEFAULT_OT_COUNT = parseInt(process.env.OT_TEST_COUNT ?? '3', 10);
 
+/**
+ * Substep 12 sec M-2 — secret-file split.
+ *
+ * The single artifact embeds three flavors of state:
+ *   1. Public  — program IDs, PDAs, init flags, slot. Safe to share.
+ *   2. Secret  — keypair bytes (`*_keypair_b64`), RPC tokens, deployer paths.
+ *   3. Public-but-derivable — addresses derived from secret values.
+ *
+ * For a clean public-repo demo, we split the on-disk representation: the
+ * primary artifact stays human-readable + safe; secrets live in a sibling
+ * `<basename>.secrets.json` with the same 0o600 perms that the merged file
+ * had. Loading is symmetric — `loadArtifact` re-merges so callers see the
+ * pre-split shape.
+ */
+function secretsPathFor(artifactPath: string): string {
+  const ext = artifactPath.endsWith('.json') ? '.json' : '';
+  const base = ext ? artifactPath.slice(0, -ext.length) : artifactPath;
+  return `${base}.secrets${ext || '.json'}`;
+}
+
+/** Top-level artifact keys that contain secret material. */
+type SecretMintKey =
+  | 'usdc_test_mint_keypair_b64'
+  | 'arl_ot_mint_keypair_b64'
+  | 'rwt_mint_keypair_b64';
+const SECRET_MINT_KEYS: ReadonlyArray<SecretMintKey> = [
+  'usdc_test_mint_keypair_b64',
+  'arl_ot_mint_keypair_b64',
+  'rwt_mint_keypair_b64',
+];
+
+type SecretOtKey = 'ot_mint_keypair_b64';
+const SECRET_OT_KEYS: ReadonlyArray<SecretOtKey> = ['ot_mint_keypair_b64'];
+
+interface SecretsFile {
+  /** Schema version mirrors the public artifact's version. */
+  schema_version: number;
+  /** Optional deployer keypair path — duplicated here so secrets file is self-contained. */
+  deployer_keypair_path?: string;
+  /** Subset of `mints` containing only `*_keypair_b64` fields. */
+  mints?: Partial<Record<SecretMintKey, string>>;
+  /** Per-OT keypair bytes, keyed by OT mint pubkey (base58). */
+  ots?: Record<string, { ot_mint_keypair_b64: string }>;
+  /** Per-bot keypair paths (already kept here for completeness). */
+  bots?: Artifact['bots'];
+}
+
 // --------------------------------------------------------------------------
 // Logging
 // --------------------------------------------------------------------------
@@ -168,7 +215,32 @@ function loadArtifact(path: string): Artifact {
   if (!existsSync(path)) {
     throw new Error(`artifact not found: ${path}`);
   }
-  return JSON.parse(readFileSync(path, 'utf8')) as Artifact;
+  const merged = JSON.parse(readFileSync(path, 'utf8')) as Artifact;
+
+  // Sec M-2: re-merge secrets file (if present) into the in-memory artifact.
+  // Older runs that wrote a single combined file still load cleanly because
+  // the public file already carries every key — the secrets file is purely
+  // additive on first split, then takes over on subsequent saves.
+  const secretsPath = secretsPathFor(path);
+  if (existsSync(secretsPath)) {
+    const secrets = JSON.parse(readFileSync(secretsPath, 'utf8')) as SecretsFile;
+    if (secrets.deployer_keypair_path && !merged.deployer_keypair_path) {
+      merged.deployer_keypair_path = secrets.deployer_keypair_path;
+    }
+    if (secrets.mints) {
+      merged.mints = { ...(merged.mints ?? {}), ...secrets.mints } as Artifact['mints'];
+    }
+    if (secrets.bots) {
+      merged.bots = { ...(merged.bots ?? {}), ...secrets.bots };
+    }
+    if (secrets.ots && Array.isArray(merged.ots)) {
+      merged.ots = merged.ots.map((rec) => {
+        const sec = secrets.ots?.[rec.ot_mint];
+        return sec ? { ...rec, ...sec } : rec;
+      });
+    }
+  }
+  return merged;
 }
 
 function saveArtifact(path: string, art: Artifact): void {
@@ -176,14 +248,85 @@ function saveArtifact(path: string, art: Artifact): void {
   // from older script versions get re-tagged on the next run.
   art.schema_version = ARTIFACT_SCHEMA_VERSION;
   mkdirSync(dirname(path), { recursive: true });
+
+  // ---------------------------------------------------------------------------
+  // Sec M-2: split the artifact into a public file (no secrets) and a sibling
+  // `.secrets.json` that holds keypair bytes + deployer path. Both files keep
+  // 0o600 perms — the secrets file because it's a secret, the public file
+  // because Substep 12 still embeds session-level state we don't want random
+  // local users tampering with mid-bootstrap.
+  // ---------------------------------------------------------------------------
+  const secrets: SecretsFile = { schema_version: ARTIFACT_SCHEMA_VERSION };
+
+  // Deployer keypair path — referenced by every consumer; safe to keep in the
+  // public file IF the file path itself isn't sensitive. Bootstrap writes it
+  // to a local `keys/` directory, so we keep it in BOTH for compatibility.
+  if (art.deployer_keypair_path) {
+    secrets.deployer_keypair_path = art.deployer_keypair_path;
+  }
+
+  // Mint keypair bytes — strip from public, mirror to secrets.
+  if (art.mints) {
+    const mintsCopy = { ...art.mints };
+    secrets.mints = {};
+    for (const k of SECRET_MINT_KEYS) {
+      const v = (mintsCopy as Record<string, unknown>)[k];
+      if (typeof v === 'string' && v.length > 0) {
+        secrets.mints[k] = v;
+        delete (mintsCopy as Record<string, unknown>)[k];
+      }
+    }
+    art.mints = mintsCopy as Artifact['mints'];
+  }
+
+  // OT mint keypair bytes — strip from each public OT record, mirror to secrets.
+  if (Array.isArray(art.ots)) {
+    secrets.ots = {};
+    art.ots = art.ots.map((rec) => {
+      const copy = { ...rec };
+      for (const k of SECRET_OT_KEYS) {
+        const v = (copy as Record<string, unknown>)[k];
+        if (typeof v === 'string' && v.length > 0) {
+          (secrets.ots as Record<string, { ot_mint_keypair_b64: string }>)[rec.ot_mint] = {
+            ot_mint_keypair_b64: v,
+          };
+          delete (copy as Record<string, unknown>)[k];
+        }
+      }
+      return copy;
+    });
+  }
+
+  // Bots — keypair paths land in BOTH files. The path itself is non-sensitive;
+  // the keypair file at that path is. We mirror to keep the secrets file
+  // self-contained.
+  if (art.bots) {
+    secrets.bots = art.bots;
+  }
+
   writeFileSync(path, JSON.stringify(art, null, 2) + '\n', 'utf8');
-  // Sec M-1 — operator-only readable. The artifact embeds test-mint authority
-  // keypairs (base64); world-readable would let any local user mint test
-  // tokens or impersonate the deployer on this validator.
   try {
     chmodSync(path, 0o600);
   } catch {
     // Non-POSIX filesystem — best-effort.
+  }
+
+  // Skip the secrets file entirely if we have nothing secret to store (e.g.
+  // pre-init artifact with only programs[]). Avoids a confusing empty file.
+  const hasSecrets =
+    !!secrets.deployer_keypair_path ||
+    Object.keys(secrets.mints ?? {}).length > 0 ||
+    Object.keys(secrets.ots ?? {}).length > 0 ||
+    Object.keys(secrets.bots ?? {}).length > 0;
+
+  const secretsPath = secretsPathFor(path);
+  if (hasSecrets) {
+    writeFileSync(secretsPath, JSON.stringify(secrets, null, 2) + '\n', 'utf8');
+    try {
+      chmodSync(secretsPath, 0o600);
+    } catch {
+      // Best-effort.
+    }
   }
 }
 

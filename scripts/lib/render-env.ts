@@ -7,8 +7,9 @@
  * Public-repo readiness: this script never modifies the `.env.example`
  * templates (committed); it only writes `.env` files (gitignored).
  *
- * For Substep 12 (localhost only) the cranks land with SEND_TX=false so they
- * stay decision-only — Substep 13 flips it once D2 live-submit ships.
+ * Cranks land with SEND_TX=false so they stay decision-only by default.
+ * Substep 13 wires the env var into each crank's EnvSchema; flip it to
+ * `true` (in the rendered .env, after a fresh deploy) for live-submit.
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -190,6 +191,7 @@ const BOTS: BotSpec[] = [
       RWT_MINT: art.mints?.rwt_mint ?? '',
       NEXUS_MANAGED_POOLS: art.pdas?.master_pool ?? '',
       LOG_LEVEL: 'info',
+      SEND_TX: 'false',
     }),
   },
   {
