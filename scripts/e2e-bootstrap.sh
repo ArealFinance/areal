@@ -288,7 +288,14 @@ build_one() {
   log "building $crate"
   (
     cd "$ROOT_DIR/contracts/$crate"
-    cargo build-sbf >>"$LOG_FILE" 2>&1
+    # R20 tripwire: yield-distribution refuses to build with the devnet
+    # placeholder RWT/USDC mint bytes unless `dev-placeholder-mints` is
+    # enabled. Mainnet runbook drops this flag after replacing the bytes.
+    if [[ "$crate" == "yield-distribution" ]]; then
+      cargo build-sbf --features dev-placeholder-mints >>"$LOG_FILE" 2>&1
+    else
+      cargo build-sbf >>"$LOG_FILE" 2>&1
+    fi
   )
 }
 
