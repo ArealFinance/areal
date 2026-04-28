@@ -71,6 +71,15 @@ declare -A BOT_KEYPAIR_NAMES=(
   [convert-and-fund-crank]="convert-fund-crank.json"
   [yield-claim-crank]="yield-claim-crank.json"
   [nexus-manager]="manager.json"
+  # Layer 10 substep 2 — R-J closure: pool-rebalancer needs its own dedicated
+  # keypair so DEX::update_dex_config(rebalancer=...) registers a NON-deployer
+  # wallet (otherwise the deployer-zero-authority audit fails — D39).
+  [pool-rebalancer]="rebalancer.json"
+  # Layer 10 substep 2 — RWT vault manager bot wallet (registered via
+  # RWT::update_vault_manager). Lives alongside the other crank bots; the
+  # actual RWT-manager process is the convert-and-fund-crank reading this
+  # keypair through render-env.ts (D39 — separate from deployer for audit).
+  [rwt-manager]="rwt-manager.json"
 )
 
 VALIDATOR_PID_FILE="$DATA_DIR/test-validator.pid"
@@ -523,9 +532,20 @@ stage_bots() {
   stage_start "7/bots"
 
   # Append/update bots block in the artifact via an awk one-liner per bot.
-  for bot in revenue-crank convert-and-fund-crank yield-claim-crank nexus-manager; do
+  # Layer 10 substep 2: pool-rebalancer + rwt-manager added (R-J / D39). The
+  # rwt-manager keypair lives under bots/convert-and-fund-crank/data/ because
+  # that crank carries the RWT-side authority calls; the pool-rebalancer has
+  # its own bot directory (already exists in repo).
+  for bot in revenue-crank convert-and-fund-crank yield-claim-crank nexus-manager pool-rebalancer rwt-manager; do
     local kpname="${BOT_KEYPAIR_NAMES[$bot]}"
-    local botdata="$ROOT_DIR/bots/$bot/data"
+    local botdata
+    if [[ "$bot" == "rwt-manager" ]]; then
+      # rwt-manager has no dedicated bot dir — colocate keypair with
+      # convert-and-fund-crank (the crank that consumes the manager role).
+      botdata="$ROOT_DIR/bots/convert-and-fund-crank/data"
+    else
+      botdata="$ROOT_DIR/bots/$bot/data"
+    fi
     local kpath="$botdata/$kpname"
 
     mkdir -p "$botdata"
@@ -736,8 +756,15 @@ main() {
   stage_build
   stage_deploy
   stage_verify_ids
-  stage_init
+  # Stage ordering invariant (Layer 10 substep 2 follow-up A-13):
+  # stage_bots MUST run before stage_init. bootstrap-init.ts phaseRegisterBots
+  # consumes art.bots[pool-rebalancer] and art.bots[rwt-manager]; if stage_init
+  # ran first on a cold KEEP_LEDGER=0 ledger, those keypairs would be missing
+  # and Phase 6 registrations would silently push to init_skipped (no-op).
+  # Keep stage_bots first; init is read-only on bot keypair generation, so
+  # there is no reverse dependency.
   stage_bots
+  stage_init
   stage_render_env
   stage_smoke
   stage_summary

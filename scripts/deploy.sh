@@ -11,10 +11,10 @@
 #   1. Deploy 5 contracts + record program IDs + cross-verify
 #  R20. Optional mint-pin migration (post-deploy, pre-state-init)
 #   2. Initialize singletons (DEX/RWT/YD config)              [phaseE prefix]
-#   3. ARL OT bootstrap (init, Futarchy, YD distributor, mint) [TODO Substep 2]
-#   4. DEX pools (StandardCurve + concentrated) + initial LP  [TODO Substep 2]
+#   3. ARL OT bootstrap (init, Futarchy, YD distributor, mint) [bootstrap-init.ts]
+#   4. DEX pools (StandardCurve + concentrated) + initial LP  [bootstrap-init.ts]
 #   5. Initialize Nexus                                       [phaseNexus]
-#   6. Register bot wallets                                   [TODO Substep 2]
+#   6. Register bot wallets                                   [bootstrap-init.ts]
 #   7. Authority transfers (deployer → Multisig → Futarchy)   [TODO Substep 3]
 #   8. Fund + start 6 bots                                    [TODO Substep 4]
 #
@@ -62,20 +62,27 @@ phase_2_singletons() {
 
 # ----------------------------------------------------------------------------
 # Phase 3: ARL OT bootstrap.
-#   init_ot, Futarchy registration, YD distributor, destinations,
-#   initial mint. Pending Layer 10 Substep 2 wiring.
+#   Layer 10 substep 2 — covered by bootstrap-init.ts phases:
+#     - phaseFutarchy           (initialize_futarchy for ARL OT)
+#     - phaseArlDistributor     (vesting-period verification)
+#     - phaseDestinations       (batch_update_destinations 70/20/10)
+#     - phaseArlMint            (mint_ot initial supply, BEFORE Phase 7)
 # ----------------------------------------------------------------------------
 phase_3_arl_bootstrap() {
   log "=== Phase 3: ARL OT bootstrap ==="
-  log "TODO Substep 2: extend bootstrap-init.ts phaseE for full ARL coverage"
+  log "(covered by phaseFutarchy / phaseDestinations / phaseArlMint in scripts/lib/bootstrap-init.ts)"
 }
 
 # ----------------------------------------------------------------------------
-# Phase 4: Create DEX pools (StandardCurve + concentrated) + initial LP.
+# Phase 4: Create DEX pools + initial LP.
+#   Layer 10 substep 2 — covered by bootstrap-init.ts phases:
+#     - ensureDeployerPoolCreator (update_pool_creators ADD deployer)
+#     - phaseMasterPool           (RWT/USDC concentrated, bin_step=10, SD-4)
+#     - phaseArlRwtPool           (ARL_OT/RWT StandardCurve, OT-pair fee)
 # ----------------------------------------------------------------------------
 phase_4_dex_pools() {
   log "=== Phase 4: DEX pools + initial LP ==="
-  log "TODO Substep 2: extend bootstrap-init.ts phaseE for pool creation + LP seeding"
+  log "(covered by phaseMasterPool / phaseArlRwtPool in scripts/lib/bootstrap-init.ts)"
 }
 
 # ----------------------------------------------------------------------------
@@ -91,10 +98,14 @@ phase_5_nexus() {
 
 # ----------------------------------------------------------------------------
 # Phase 6: Register bot wallets.
+#   Layer 10 substep 2 — covered by phaseRegisterBots in bootstrap-init.ts:
+#     - RWT::update_vault_manager(rwt-manager.pubkey)
+#     - DEX::update_dex_config(rebalancer=pool-rebalancer.pubkey)
+#     - YD publish_authority + nexus.manager — verification only (set earlier)
 # ----------------------------------------------------------------------------
 phase_6_bot_registration() {
   log "=== Phase 6: Register bot wallets ==="
-  log "TODO Substep 2: bot wallet registration in bootstrap-init.ts"
+  log "(covered by phaseRegisterBots in scripts/lib/bootstrap-init.ts)"
 }
 
 # ----------------------------------------------------------------------------
