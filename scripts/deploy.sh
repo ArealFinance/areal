@@ -15,7 +15,7 @@
 #   4. DEX pools (StandardCurve + concentrated) + initial LP  [bootstrap-init.ts]
 #   5. Initialize Nexus                                       [phaseNexus]
 #   6. Register bot wallets                                   [bootstrap-init.ts]
-#   7. Authority transfers (deployer → Multisig → Futarchy)   [TODO Substep 3]
+#   7. Authority transfers (deployer → Multisig → Futarchy)   [transfer-authority.ts]
 #   8. Fund + start 6 bots                                    [TODO Substep 4]
 #
 # Optional env (forwarded to migrate-mints.sh):
@@ -110,10 +110,53 @@ phase_6_bot_registration() {
 
 # ----------------------------------------------------------------------------
 # Phase 7: Authority transfers (deployer → Multisig → Futarchy → OT).
+#   Layer 10 substep 3 — covered by scripts/lib/transfer-authority.ts. Performs
+#   the 7-step chain (1+2 OT→Futarchy atomic; 3+4 Futarchy→Multisig 2-TX;
+#   5/6/7 RWT/DEX/YD→Multisig). Per-step on-chain assertions + R-A retry +
+#   R-B precheck. The script is idempotent; re-running after partial failure
+#   is safe and continues from the first un-rotated PDA.
+#
+#   Env knobs (all optional):
+#     MULTISIG_PUBKEY=<base58>   New authority pubkey. On localhost defaults to
+#                                 the deployer keypair acting as pseudo-multisig
+#                                 (D32). Mainnet runbook MUST set this to the
+#                                 real Squads vault pubkey.
+#     MAINNET=1                   Enables --two-tx-mode (split propose/accept
+#                                 into separate TXs so accept can be signed
+#                                 off-line by the multisig signer set).
+#     ARTIFACT=<path>             Override the bootstrap artifact path
+#                                 (default: data/e2e-bootstrap.json).
 # ----------------------------------------------------------------------------
 phase_7_authority_transfers() {
   log "=== Phase 7: Authority transfers ==="
-  log "TODO Substep 3: scripts/transfer-authority.sh + dashboard tx modal"
+
+  local artifact="${ARTIFACT:-$DATA_DIR/e2e-bootstrap.json}"
+  if [[ ! -f "$artifact" ]]; then
+    log "ERROR: artifact not found at $artifact — run earlier phases first"
+    exit 1
+  fi
+
+  local extra_args=()
+  if [[ -n "${MULTISIG_PUBKEY:-}" ]]; then
+    extra_args+=("--multisig" "$MULTISIG_PUBKEY")
+  fi
+  if [[ "${MAINNET:-0}" == "1" ]]; then
+    extra_args+=("--two-tx-mode")
+  fi
+
+  log "running scripts/lib/transfer-authority.ts (artifact=$artifact)"
+  (
+    cd "$ROOT_DIR"
+    NODE_PATH="$ROOT_DIR/bots/node_modules" \
+      "$ROOT_DIR/bots/node_modules/.bin/tsx" \
+      "$SCRIPT_DIR/lib/transfer-authority.ts" \
+      --artifact "$artifact" \
+      "${extra_args[@]}" \
+      2>&1 | tee -a "$LOG_FILE"
+  ) || {
+    log "ERROR: transfer-authority.ts failed; halting deploy.sh"
+    exit 1
+  }
 }
 
 # ----------------------------------------------------------------------------
