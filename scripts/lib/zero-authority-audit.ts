@@ -234,7 +234,12 @@ async function readAuthorityCheck(
     };
   }
 
-  const info = await conn.getAccountInfo(pda);
+  // A-85: align commitment with Substep 8 S6.10 inline NEGATIVE check
+  // (`bots/.e2e/layer-10-scenario-6-emergency.test.ts::checkAuthorityNotDeployer`).
+  // Both consumers MUST read the same view of chain state for R-G dual-proof
+  // semantics to hold; a transient mismatch would surface as a false-positive
+  // verdict divergence on a slow validator.
+  const info = await conn.getAccountInfo(pda, 'confirmed');
   if (!info) {
     return {
       contract: spec.contract,

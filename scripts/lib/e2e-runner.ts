@@ -21,16 +21,16 @@
  *   scenario-3    — DEX Standard (LP/swap/zap/remove + OT-pair fee)
  *   scenario-4    — Concentrated (bin walk + shift_liquidity + conservation)
  *   scenario-5    — Nexus 14-step (deposit + swap + add LP + withdraw_profits)
- *   scenario-6    — Emergency / Authority Closure               (placeholder)
+ *   scenario-6    — Emergency / Authority Closure (10 surfaces + R-G assertion)
  *   all           — Master orchestrator runs S1..S6 in sequence (D35)
  *
- * Scenario 1/2/3/4/5 inline-exec mode
- * -----------------------------------
+ * Scenario 1/2/3/4/5/6 inline-exec mode
+ * -------------------------------------
  * Default: structured `manual-run` notice (operator drives the test file).
  * Opt-in: set `SCENARIO_<N>_INLINE_EXEC=1` and the runner shells out to
  *   `npx tsx --test bots/.e2e/layer-10-scenario-<N>-<name>.test.ts`,
  * forwarding the bootstrap artifact path + RPC env. Exit code propagates.
- * Scenario 6 remains a manual-run placeholder until Substep 8 lands.
+ * All 6 scenarios are real (Substep 8 closed the placeholder).
  *
  * Pre-flight:
  *   Reads `init_skipped[]` + `init_failed[]` from the bootstrap artifact and
@@ -355,14 +355,14 @@ async function runScenario1(state: BootstrapState, artifactPath: string): Promis
 /**
  * Shared inline-exec body for Layer 10 scenarios. Centralizes the
  * localhost-only check + narrow env passthrough + spawn pattern that
- * S1/S2/S3/S4/S5 all share. Returns a FlowResult; callers prepend
+ * S1/S2/S3/S4/S5/S6 all share. Returns a FlowResult; callers prepend
  * `flow=scenario-N`.
  *
  * SEC: env is built explicitly (not via shell expansion) to avoid quoting
  * issues with paths containing spaces.
  */
 async function runScenarioInlineExec(
-  scenarioNum: 1 | 2 | 3 | 4 | 5,
+  scenarioNum: 1 | 2 | 3 | 4 | 5 | 6,
   testPath: string,
   state: BootstrapState,
   artifactPath: string,
@@ -523,23 +523,36 @@ async function runScenario5(state: BootstrapState, artifactPath: string): Promis
 }
 
 /**
- * Placeholder for Scenario 6 — per D35, each scenario gets its own test
- * file. Substep 8 ships Scenario 6; until then, return a structured
- * `manual-run` notice that points to the corresponding (yet-unshipped) path.
+ * Inline-exec hook for Scenario 6 — Emergency / Authority Closure (10
+ * surfaces: pause_mint, pause_pool, update_publish_authority,
+ * update_nexus_manager, YD::update_config, RWT::adjust_capital writedown,
+ * RWT::update_distribution_config, YD::close_distributor, DEX
+ * propose_authority_transfer, **deployer-zero-authority closing assertion**
+ * via `assertDeployerHasNoAuthority` — R-G live closure cross-coverage
+ * with the Phase-7 positive audit). Mirrors `runScenario1` shape; opt-in
+ * via `SCENARIO_6_INLINE_EXEC=1`. Final scenario in the Layer 10 chain.
  */
-function runScenarioPlaceholder(
-  num: 6,
-  name: string,
-): FlowResult {
-  const testPath = scenarioTestFile(num, name);
-  return {
-    flow: `scenario-${num}`,
-    status: 'skipped',
-    reason: existsSync(testPath)
-      ? `test file present but inline-exec hook not implemented (Substep 8 lands per scenario)`
-      : `test file not yet shipped: ${testPath}`,
-    details: { test_file: testPath },
-  };
+async function runScenario6(state: BootstrapState, artifactPath: string): Promise<FlowResult> {
+  const testPath = scenarioTestFile(6, 'emergency');
+  if (!existsSync(testPath)) {
+    return {
+      flow: 'scenario-6',
+      status: 'skipped',
+      reason: `test file missing: ${testPath}`,
+    };
+  }
+  const inlineExec = process.env.SCENARIO_6_INLINE_EXEC === '1';
+  if (!inlineExec) {
+    return {
+      flow: 'scenario-6',
+      status: 'skipped',
+      reason:
+        `manual-run — set SCENARIO_6_INLINE_EXEC=1 to drive in-process, ` +
+        `or run \`npx tsx --test ${testPath}\``,
+      details: { test_file: testPath },
+    };
+  }
+  return runScenarioInlineExec(6, testPath, state, artifactPath);
 }
 
 // --------------------------------------------------------------------------
@@ -641,7 +654,16 @@ async function runScenario(
   }
   if (scenario === 'scenario-6' || scenario === 'all') {
     log('orch', 'flow=scenario-6');
-    flows.push(runScenarioPlaceholder(6, 'emergency'));
+    const s6Result = await runScenario6(state, artifactPath);
+    flows.push(s6Result);
+    // Halt-after-error chain (T-34 / SEC-78) terminates at S6: the final
+    // scenario in the Layer 10 chain. A hard failure here propagates to
+    // the runner's exit code (deploy.sh treats non-zero exit as a fatal
+    // gate). No subsequent scenario to skip.
+    if (scenario === 'all' && s6Result.status === 'error') {
+      warn('orch', 'halt-after-error — Scenario 6 (final) failed; exit propagates non-zero');
+      return flows;
+    }
   }
 
   return flows;
