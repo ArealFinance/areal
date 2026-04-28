@@ -26,20 +26,25 @@
  *
  * Step sequence (D31):
  *
- *   1+2. OT → Futarchy ATOMIC                (single TX, deployer signs both ix)
+ *   1+2. OT → Futarchy ATOMIC                (single TX bundling propose +
+ *                                             permissionless claim_ot_governance)
  *   3.   Futarchy → Multisig PROPOSE          (deployer signs)
  *   4.   Futarchy → Multisig ACCEPT           (multisig signs)
- *   5.   RWT  → Multisig                       (devnet: 1 TX; mainnet: 2 TXs)
- *   6.   DEX  → Multisig                       (devnet: 1 TX; mainnet: 2 TXs)
- *   7.   YD   → Multisig                       (devnet: 1 TX; mainnet: 2 TXs)
+ *   5.   RWT  → Multisig PROPOSE + ACCEPT     (always 2 TXs per A-26)
+ *   6.   DEX  → Multisig PROPOSE + ACCEPT     (always 2 TXs per A-26)
+ *   7.   YD   → Multisig PROPOSE + ACCEPT     (always 2 TXs per A-26)
  *
  * Devnet vs mainnet (D32):
+ *   All 4 downstream flows (Futarchy + 3 singletons) execute as 2 TXs always
+ *   per A-26 alignment with D31's literal prose. Only Step 1+2 is bundled
+ *   (atomic claim is permissionless and OT propose is censorship-resistant).
  *   On devnet (Layer 10 dress rehearsal) the multisig is the deployer
- *   keypair acting as a single-sig surrogate, so steps 4/5/6/7 can collapse
- *   propose+accept into one TX (the deployer signs both ix). Mainnet uses a
- *   real multisig (Squads) — propose and accept must be separate TXs so the
- *   second one can be signed off-line by the multisig signer set. The
- *   `--two-tx-mode` flag (or `MAINNET=1` env) selects the mainnet path.
+ *   keypair acting as a single-sig surrogate (D32) — both propose and accept
+ *   sign locally with the same key. On mainnet a real multisig (Squads)
+ *   signs accept off-line; the script halts after propose unless the local
+ *   key matches the multisig pubkey. The `--two-tx-mode` flag (or `MAINNET=1`
+ *   env) toggles the "halt-if-multisig-not-local" gate; the propose+accept
+ *   structure itself is invariant.
  *
  * CLI:
  *   node --enable-source-maps scripts/lib/transfer-authority.js \
@@ -530,9 +535,13 @@ export interface TransferAuthorityOptions {
   /** Max retries per TX (R-A mitigation). Default = 3. */
   maxRetries?: number;
   /**
-   * If true, split each propose-and-accept flow into TWO separate TXs so the
-   * second TX can be signed off-line by an external multisig (mainnet path).
-   * If false, the deployer signs both ix in a single TX (devnet shortcut, D32).
+   * Mainnet ceremony gate. When true, the script halts after each
+   * propose TX unless the local key matches the multisig pubkey, leaving
+   * accept TXs for an external Squads multisig to sign off-line. When
+   * false (devnet default per D32), the deployer signs both propose and
+   * accept locally. The TX SHAPE is unchanged either way — all 4 downstream
+   * flows always execute as 2 separate TXs per A-26 alignment with D31.
+   * Implies SEC-34: requires explicit non-deployer multisig in mainnet mode.
    */
   twoTxMode?: boolean;
 }
