@@ -161,10 +161,61 @@ phase_7_authority_transfers() {
 
 # ----------------------------------------------------------------------------
 # Phase 8: Fund + start 6 bots.
+#   Layer 10 substep 4 — covered by scripts/lib/start-bots.ts. Stage 1
+#   tops up each bot wallet to FUNDING_LAMPORTS (default 0.1 SOL); Stage 2
+#   spawns the 6 bots in D33 order (pool-rebalancer + merkle-publisher,
+#   block on first merkle root publish, then revenue-crank +
+#   convert-and-fund-crank + yield-claim-crank + nexus-manager); Stage 3
+#   verifies every spawned child is still alive after a short dwell. The
+#   orchestrator is idempotent — re-running after a partial failure does
+#   not double-fund or spawn duplicates.
+#
+#   Env knobs (all optional):
+#     FUNDING_LAMPORTS              Per-bot funding floor (lamports).
+#                                    Default 100_000_000 = 0.1 SOL.
+#                                    Capped to < 1 SOL to prevent fat-finger
+#                                    drains of the deployer wallet.
+#     FIRST_ROOT_TIMEOUT_MS         Time budget for the merkle-publisher
+#                                    first-root wait (R-C). Default 600_000
+#                                    = 10 min per Layer 10 plan.
+#     POLL_INTERVAL_MS              Cadence for the on-chain liveness probe.
+#                                    Default 5_000.
+#     ARTIFACT=<path>               Override the bootstrap artifact path
+#                                    (default: data/e2e-bootstrap.json).
 # ----------------------------------------------------------------------------
 phase_8_start_bots() {
   log "=== Phase 8: Fund + start bots ==="
-  log "TODO Substep 4: scripts/start-bots.sh orchestrator + healthcheck"
+
+  local artifact="${ARTIFACT:-$DATA_DIR/e2e-bootstrap.json}"
+  if [[ ! -f "$artifact" ]]; then
+    log "ERROR: artifact not found at $artifact — run earlier phases first"
+    exit 1
+  fi
+
+  local extra_args=()
+  if [[ -n "${FUNDING_LAMPORTS:-}" ]]; then
+    extra_args+=("--funding-lamports" "$FUNDING_LAMPORTS")
+  fi
+  if [[ -n "${FIRST_ROOT_TIMEOUT_MS:-}" ]]; then
+    extra_args+=("--first-root-timeout-ms" "$FIRST_ROOT_TIMEOUT_MS")
+  fi
+  if [[ -n "${POLL_INTERVAL_MS:-}" ]]; then
+    extra_args+=("--poll-interval-ms" "$POLL_INTERVAL_MS")
+  fi
+
+  log "running scripts/lib/start-bots.ts (artifact=$artifact)"
+  (
+    cd "$ROOT_DIR"
+    NODE_PATH="$ROOT_DIR/bots/node_modules" \
+      "$ROOT_DIR/bots/node_modules/.bin/tsx" \
+      "$SCRIPT_DIR/lib/start-bots.ts" \
+      --artifact "$artifact" \
+      "${extra_args[@]}" \
+      2>&1 | tee -a "$LOG_FILE"
+  ) || {
+    log "ERROR: start-bots.ts failed; halting deploy.sh"
+    exit 1
+  }
 }
 
 # ----------------------------------------------------------------------------
