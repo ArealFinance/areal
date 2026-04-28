@@ -283,6 +283,70 @@ stage_deployer() {
 # Stage 3 — cargo build-sbf
 # ----------------------------------------------------------------------------
 
+# Cross-check that the R20 sentinel agrees with the on-disk constants.rs.
+# Two attack vectors close here (per SD-1 follow-up SEC-17 / A-10):
+#   (a) operator runs migrate-mints.sh then `git checkout` reverts
+#       constants.rs — sentinel becomes stale, build silently picks
+#       no-flag mode and panics with a confusing cargo trace;
+#   (b) attacker creates an empty / spoofed sentinel to flip the build
+#       mode without actually pinning real bytes.
+# When the sentinel is present, decode the sentinel pubkeys and compare
+# them byte-for-byte against the RWT_MINT / USDC_MINT bodies in
+# constants.rs. Mismatch = die with a clear remediation message.
+verify_r20_sentinel() {
+  local sentinel="$ROOT_DIR/data/r20-migrated.json"
+  local consts="$ROOT_DIR/contracts/yield-distribution/src/constants.rs"
+  python3 - "$sentinel" "$consts" <<'PY'
+import json, re, sys
+try:
+    import base58
+except Exception as e:
+    print(f"ERROR: python3 base58 module missing ({e}); cannot verify R20 sentinel", file=sys.stderr)
+    sys.exit(1)
+sentinel_path, consts_path = sys.argv[1], sys.argv[2]
+try:
+    with open(sentinel_path) as f:
+        d = json.load(f)
+except Exception as e:
+    print(f"ERROR: failed to parse {sentinel_path}: {e}", file=sys.stderr)
+    sys.exit(1)
+rwt_pk, usdc_pk = d.get("rwt"), d.get("usdc")
+if not rwt_pk or not usdc_pk:
+    print(f"ERROR: {sentinel_path} missing 'rwt' or 'usdc' field", file=sys.stderr)
+    sys.exit(1)
+with open(consts_path) as f:
+    src = f.read()
+def expected_body(pubkey):
+    raw = base58.b58decode(pubkey)
+    if len(raw) != 32:
+        raise ValueError(f"{pubkey} decodes to {len(raw)} bytes, expected 32")
+    lines = []
+    for chunk_start in range(0, 32, 8):
+        chunk = raw[chunk_start:chunk_start + 8]
+        lines.append("    " + ", ".join(f"0x{b:02x}" for b in chunk) + ",")
+    return "\n".join(lines)
+def actual_body(name):
+    m = re.search(r'(?m)^pub const ' + re.escape(name) + r': \[u8; 32\] = \[(.*?)\];',
+                  src, re.DOTALL)
+    if not m:
+        return None
+    return "\n".join(l.strip() for l in m.group(1).strip().splitlines())
+for name, pubkey in [("RWT_MINT", rwt_pk), ("USDC_MINT", usdc_pk)]:
+    exp = "\n".join(l.strip() for l in expected_body(pubkey).splitlines())
+    act = actual_body(name)
+    if act is None:
+        print(f"ERROR: cannot find {name} const in {consts_path}", file=sys.stderr)
+        sys.exit(1)
+    if exp != act:
+        print(f"ERROR: R20 sentinel/source out-of-sync for {name}", file=sys.stderr)
+        print(f"  sentinel claims pubkey {pubkey}", file=sys.stderr)
+        print(f"  but constants.rs holds different bytes", file=sys.stderr)
+        print(f"  remediation: re-run scripts/migrate-mints.sh OR `rm $sentinel_path` to revert to placeholder build", file=sys.stderr)
+        sys.exit(1)
+print("R20 sentinel verified against constants.rs")
+PY
+}
+
 build_one() {
   local crate="$1"
   log "building $crate"
@@ -292,12 +356,14 @@ build_one() {
     # placeholder RWT/USDC mint bytes unless `dev-placeholder-mints` is
     # enabled. Mainnet runbook drops this flag after replacing the bytes
     # via scripts/migrate-mints.sh. We auto-detect which mode applies by
-    # checking the data/r20-migrated.json sentinel: present = real bytes
-    # were pinned, build without the flag so the tripwire verifies the
-    # swap; absent = placeholder build, pass the flag.
+    # checking the data/r20-migrated.json sentinel; sentinel content is
+    # cross-checked against constants.rs to defeat sentinel-spoofing /
+    # source-revert skews (SD-1 follow-up SEC-17 / A-10).
     if [[ "$crate" == "yield-distribution" ]]; then
       if [[ -f "$ROOT_DIR/data/r20-migrated.json" ]]; then
-        log "  R20: data/r20-migrated.json present → building yield-distribution WITHOUT dev-placeholder-mints"
+        log "  R20: data/r20-migrated.json present → cross-checking against constants.rs"
+        verify_r20_sentinel
+        log "  R20: building yield-distribution WITHOUT dev-placeholder-mints"
         cargo build-sbf >>"$LOG_FILE" 2>&1
       else
         cargo build-sbf --features dev-placeholder-mints >>"$LOG_FILE" 2>&1

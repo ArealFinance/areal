@@ -9,10 +9,10 @@
 #
 # Phase map:
 #   1. Deploy 5 contracts + record program IDs + cross-verify
+#  R20. Optional mint-pin migration (post-deploy, pre-state-init)
 #   2. Initialize singletons (DEX/RWT/YD config)              [phaseE prefix]
 #   3. ARL OT bootstrap (init, Futarchy, YD distributor, mint) [TODO Substep 2]
 #   4. DEX pools (StandardCurve + concentrated) + initial LP  [TODO Substep 2]
-#  R20. Optional mint-pin migration (devnet rehearsal step)
 #   5. Initialize Nexus                                       [phaseNexus]
 #   6. Register bot wallets                                   [TODO Substep 2]
 #   7. Authority transfers (deployer → Multisig → Futarchy)   [TODO Substep 3]
@@ -149,10 +149,16 @@ phase_r20_migrate() {
 main() {
   log "Layer 10 deploy.sh starting"
   phase_1_deploy "$@"
+  # R20 runs IMMEDIATELY after deploy and BEFORE any state-init phase
+  # (per SD-1 follow-up A-12). Rationale: phase_r20_migrate halts with
+  # exit=2 unless ALLOW_INCOMPLETE_R20=1, so any state-creating phase
+  # ahead of it would land on-chain against the placeholder build and
+  # leak orphaned state on halt. Keeping R20 right after deploy means
+  # the abort-and-redeploy recovery path is loss-free.
+  phase_r20_migrate
   phase_2_singletons
   phase_3_arl_bootstrap
   phase_4_dex_pools
-  phase_r20_migrate
   phase_5_nexus
   phase_6_bot_registration
   phase_7_authority_transfers
