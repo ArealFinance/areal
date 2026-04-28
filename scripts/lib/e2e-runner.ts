@@ -17,19 +17,20 @@
  *
  * Layer 10 named scenarios (D35 — one file per scenario):
  *   scenario-1    — Happy Path (mint_rwt + admin_mint + revenue→yield→claim)
- *   scenario-2    — Governance (Futarchy)                       (placeholder)
- *   scenario-3    — DEX Standard                                (placeholder)
+ *   scenario-2    — Governance (Futarchy proposal lifecycle)
+ *   scenario-3    — DEX Standard (LP/swap/zap/remove + OT-pair fee)
  *   scenario-4    — Concentrated                                (placeholder)
  *   scenario-5    — Nexus 14-step                               (placeholder)
  *   scenario-6    — Emergency / Authority Closure               (placeholder)
  *   all           — Master orchestrator runs S1..S6 in sequence (D35)
  *
- * Scenario 1 inline-exec mode
- * ---------------------------
+ * Scenario 1/2/3 inline-exec mode
+ * --------------------------------
  * Default: structured `manual-run` notice (operator drives the test file).
- * Opt-in: set `SCENARIO_1_INLINE_EXEC=1` and the runner shells out to
- *   `npx tsx --test bots/.e2e/layer-10-scenario-1-happy-path.test.ts`,
+ * Opt-in: set `SCENARIO_<N>_INLINE_EXEC=1` and the runner shells out to
+ *   `npx tsx --test bots/.e2e/layer-10-scenario-<N>-<name>.test.ts`,
  * forwarding the bootstrap artifact path + RPC env. Exit code propagates.
+ * Scenarios 4/5/6 remain manual-run placeholders until Substeps 7/8 land.
  *
  * Pre-flight:
  *   Reads `init_skipped[]` + `init_failed[]` from the bootstrap artifact and
@@ -343,22 +344,40 @@ async function runScenario1(state: BootstrapState, artifactPath: string): Promis
       details: { test_file: testPath },
     };
   }
-
   // Inline-exec: only meaningful for localhost target. Refuse devnet to keep
   // the runner from inadvertently driving live state from a CI runner.
+  // (Localhost check + spawn are factored into runScenarioInlineExec so S1/S2/
+  // S3 share one implementation — keeps the env-passthrough + tsxBin discovery
+  // fix-once.)
+  return runScenarioInlineExec(1, testPath, state, artifactPath);
+}
+
+/**
+ * Shared inline-exec body for Layer 10 scenarios. Centralizes the
+ * localhost-only check + narrow env passthrough + spawn pattern that S1/S2/S3
+ * all share. Returns a FlowResult; callers prepend `flow=scenario-N`.
+ *
+ * SEC: env is built explicitly (not via shell expansion) to avoid quoting
+ * issues with paths containing spaces.
+ */
+async function runScenarioInlineExec(
+  scenarioNum: 1 | 2 | 3,
+  testPath: string,
+  state: BootstrapState,
+  artifactPath: string,
+): Promise<FlowResult> {
+  const flow = `scenario-${scenarioNum}` as const;
+
   if (state.bootstrap_target !== 'localhost') {
     return {
-      flow: 'scenario-1',
+      flow,
       status: 'skipped',
       reason: `inline-exec restricted to localhost (got ${state.bootstrap_target})`,
     };
   }
 
-  log('scenario-1', `inline-exec → tsx --test ${testPath}`);
+  log(flow, `inline-exec → tsx --test ${testPath}`);
 
-  // Forward the artifact path + RPC env to the test process. Inherit stdio
-  // so operator sees per-step TAP output. SEC: pass env explicitly rather
-  // than via shell expansion to avoid quoting issues with paths.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     E2E_BOOTSTRAP_ARTIFACT: artifactPath,
@@ -373,21 +392,17 @@ async function runScenario1(state: BootstrapState, artifactPath: string): Promis
   });
 
   if (result.error) {
-    return {
-      flow: 'scenario-1',
-      status: 'error',
-      reason: `spawn failed: ${result.error.message}`,
-    };
+    return { flow, status: 'error', reason: `spawn failed: ${result.error.message}` };
   }
   if (result.status !== 0) {
     return {
-      flow: 'scenario-1',
+      flow,
       status: 'error',
       reason: `test process exited with code=${result.status} (signal=${result.signal ?? 'none'})`,
     };
   }
   return {
-    flow: 'scenario-1',
+    flow,
     status: 'ok',
     reason: 'inline-exec passed',
     details: { test_file: testPath },
@@ -395,12 +410,67 @@ async function runScenario1(state: BootstrapState, artifactPath: string): Promis
 }
 
 /**
- * Placeholder for Scenarios 2-6 — per D35, each scenario gets its own test
- * file. Substeps 6/7/8 ship those files; until then, return a structured
+ * Inline-exec hook for Scenario 2 — Governance (Futarchy proposal lifecycle).
+ * Mirrors `runScenario1` shape; opt-in via `SCENARIO_2_INLINE_EXEC=1`.
+ */
+async function runScenario2(state: BootstrapState, artifactPath: string): Promise<FlowResult> {
+  const testPath = scenarioTestFile(2, 'governance');
+  if (!existsSync(testPath)) {
+    return {
+      flow: 'scenario-2',
+      status: 'skipped',
+      reason: `test file missing: ${testPath}`,
+    };
+  }
+  const inlineExec = process.env.SCENARIO_2_INLINE_EXEC === '1';
+  if (!inlineExec) {
+    return {
+      flow: 'scenario-2',
+      status: 'skipped',
+      reason:
+        `manual-run — set SCENARIO_2_INLINE_EXEC=1 to drive in-process, ` +
+        `or run \`npx tsx --test ${testPath}\``,
+      details: { test_file: testPath },
+    };
+  }
+  return runScenarioInlineExec(2, testPath, state, artifactPath);
+}
+
+/**
+ * Inline-exec hook for Scenario 3 — DEX Standard (StandardCurve LP/swap/zap/
+ * remove + OT pair fee). Mirrors `runScenario1` shape; opt-in via
+ * `SCENARIO_3_INLINE_EXEC=1`.
+ */
+async function runScenario3(state: BootstrapState, artifactPath: string): Promise<FlowResult> {
+  const testPath = scenarioTestFile(3, 'dex');
+  if (!existsSync(testPath)) {
+    return {
+      flow: 'scenario-3',
+      status: 'skipped',
+      reason: `test file missing: ${testPath}`,
+    };
+  }
+  const inlineExec = process.env.SCENARIO_3_INLINE_EXEC === '1';
+  if (!inlineExec) {
+    return {
+      flow: 'scenario-3',
+      status: 'skipped',
+      reason:
+        `manual-run — set SCENARIO_3_INLINE_EXEC=1 to drive in-process, ` +
+        `or run \`npx tsx --test ${testPath}\``,
+      details: { test_file: testPath },
+    };
+  }
+  return runScenarioInlineExec(3, testPath, state, artifactPath);
+}
+
+/**
+ * Placeholder for Scenarios 4-6 — per D35, each scenario gets its own test
+ * file. Substeps 7/8 ship those files; until then, return a structured
  * `manual-run` notice that points to the corresponding (yet-unshipped) path.
  */
 function runScenarioPlaceholder(
-  num: 2 | 3 | 4 | 5 | 6,
+  num: 4 | 5 | 6,
   name: string,
 ): FlowResult {
   const testPath = scenarioTestFile(num, name);
@@ -408,7 +478,7 @@ function runScenarioPlaceholder(
     flow: `scenario-${num}`,
     status: 'skipped',
     reason: existsSync(testPath)
-      ? `test file present but inline-exec hook not implemented (Substep 6/7/8 lands per scenario)`
+      ? `test file present but inline-exec hook not implemented (Substep 7/8 lands per scenario)`
       : `test file not yet shipped: ${testPath}`,
     details: { test_file: testPath },
   };
@@ -459,22 +529,34 @@ async function runScenario(
     log('orch', 'flow=scenario-1');
     const s1Result = await runScenario1(state, artifactPath);
     flows.push(s1Result);
-    // T-34 / SEC-78: halting --scenario all after Scenario 1 error — running
-    // the remaining placeholders against a half-broken happy path tends to
-    // mask the root cause and burns CI time. Fail-fast is the safer default
-    // for ops; operators who want to keep going can re-run individual scenarios.
+    // T-34 / SEC-78: halting --scenario all after a hard failure — running the
+    // remaining scenarios against a half-broken happy path tends to mask the
+    // root cause and burns CI time. Fail-fast is the safer default for ops;
+    // operators who want to keep going can re-run individual scenarios. The
+    // halt extends to S2/S3 since they share the same on-chain state and any
+    // S1 fault would surface as cascading false-negatives downstream.
     if (scenario === 'all' && s1Result.status === 'error') {
-      warn('orch', 'halt-after-error — Scenario 1 failed; skipping S2..S6 placeholders');
+      warn('orch', 'halt-after-error — Scenario 1 failed; skipping S2..S6');
       return flows;
     }
   }
   if (scenario === 'scenario-2' || scenario === 'all') {
     log('orch', 'flow=scenario-2');
-    flows.push(runScenarioPlaceholder(2, 'governance'));
+    const s2Result = await runScenario2(state, artifactPath);
+    flows.push(s2Result);
+    if (scenario === 'all' && s2Result.status === 'error') {
+      warn('orch', 'halt-after-error — Scenario 2 failed; skipping S3..S6');
+      return flows;
+    }
   }
   if (scenario === 'scenario-3' || scenario === 'all') {
     log('orch', 'flow=scenario-3');
-    flows.push(runScenarioPlaceholder(3, 'dex-standard'));
+    const s3Result = await runScenario3(state, artifactPath);
+    flows.push(s3Result);
+    if (scenario === 'all' && s3Result.status === 'error') {
+      warn('orch', 'halt-after-error — Scenario 3 failed; skipping S4..S6');
+      return flows;
+    }
   }
   if (scenario === 'scenario-4' || scenario === 'all') {
     log('orch', 'flow=scenario-4');
