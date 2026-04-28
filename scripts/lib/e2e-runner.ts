@@ -1,19 +1,35 @@
 #!/usr/bin/env tsx
 /*
- * e2e-runner.ts — R-58 operator-driven Layer 9 scenario runner.
+ * e2e-runner.ts — operator-driven scenario runner.
  *
  * Drives one full live-submit cycle per crank against the bootstrapped
  * localhost validator, feeding `BotConfig.sendTx = true` so each crank
  * actually lands its on-chain ix. Designed for hands-on E2E verification
- * of Layer 8 + Layer 9 wiring once the cranks pass their unit tests.
+ * of Layers 8-10 wiring once the cranks pass their unit tests.
  *
- * Scenarios:
- *   full         — every flow that's gate-clean
- *   revenue-only — just revenue-crank
- *   yield-only   — just yield-claim-crank
- *   convert-only — just convert-and-fund-crank
- *   nexus-only   — just nexus-manager (gated on R57)
- *   lh-drain     — opt-in YD::withdraw_liquidity_holding (gated on R20)
+ * Layer 9 legacy scenarios (per-flow):
+ *   full          — every flow that's gate-clean
+ *   revenue-only  — just revenue-crank
+ *   yield-only    — just yield-claim-crank
+ *   convert-only  — just convert-and-fund-crank
+ *   nexus-only    — just nexus-manager (gated on R57)
+ *   lh-drain      — opt-in YD::withdraw_liquidity_holding (gated on R20)
+ *
+ * Layer 10 named scenarios (D35 — one file per scenario):
+ *   scenario-1    — Happy Path (mint_rwt + admin_mint + revenue→yield→claim)
+ *   scenario-2    — Governance (Futarchy)                       (placeholder)
+ *   scenario-3    — DEX Standard                                (placeholder)
+ *   scenario-4    — Concentrated                                (placeholder)
+ *   scenario-5    — Nexus 14-step                               (placeholder)
+ *   scenario-6    — Emergency / Authority Closure               (placeholder)
+ *   all           — Master orchestrator runs S1..S6 in sequence (D35)
+ *
+ * Scenario 1 inline-exec mode
+ * ---------------------------
+ * Default: structured `manual-run` notice (operator drives the test file).
+ * Opt-in: set `SCENARIO_1_INLINE_EXEC=1` and the runner shells out to
+ *   `npx tsx --test bots/.e2e/layer-10-scenario-1-happy-path.test.ts`,
+ * forwarding the bootstrap artifact path + RPC env. Exit code propagates.
  *
  * Pre-flight:
  *   Reads `init_skipped[]` + `init_failed[]` from the bootstrap artifact and
@@ -30,6 +46,7 @@
  *     per-flow decision summary (no secrets).
  */
 
+import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,7 +124,20 @@ function warn(scope: string, msg: string, extra?: Record<string, unknown>): void
 // Scenario gating
 // --------------------------------------------------------------------------
 
-type Scenario = 'full' | 'revenue-only' | 'yield-only' | 'convert-only' | 'nexus-only' | 'lh-drain';
+type Scenario =
+  | 'full'
+  | 'revenue-only'
+  | 'yield-only'
+  | 'convert-only'
+  | 'nexus-only'
+  | 'lh-drain'
+  | 'scenario-1'
+  | 'scenario-2'
+  | 'scenario-3'
+  | 'scenario-4'
+  | 'scenario-5'
+  | 'scenario-6'
+  | 'all';
 
 const VALID_SCENARIOS: readonly Scenario[] = [
   'full',
@@ -116,7 +146,15 @@ const VALID_SCENARIOS: readonly Scenario[] = [
   'convert-only',
   'nexus-only',
   'lh-drain',
+  'scenario-1',
+  'scenario-2',
+  'scenario-3',
+  'scenario-4',
+  'scenario-5',
+  'scenario-6',
+  'all',
 ];
+
 
 interface GateCheck {
   ok: boolean;
@@ -133,10 +171,15 @@ function checkR57(state: BootstrapState): GateCheck {
 }
 
 function checkR20(state: BootstrapState): GateCheck {
+  // T-32: align needle with bootstrap-init.ts canonical phase string
+  // (`YD::initialize_liquidity_holding` — see bootstrap-init.ts:807-817).
+  // Both init_skipped[] and init_failed[] entries match the same prefix.
   const failed = (state.init_failed ?? []).some((f) =>
     f.phase.includes('initialize_liquidity_holding'),
   );
-  const skipped = (state.init_skipped ?? []).some((p) => p.includes('liquidity_holding'));
+  const skipped = (state.init_skipped ?? []).some((p) =>
+    p.includes('initialize_liquidity_holding'),
+  );
   if (failed || skipped || !state.pdas?.liquidity_holding) {
     return { ok: false, reason: 'gated on R20 — RWT mint pin migration / LiquidityHolding init pending' };
   }
@@ -261,6 +304,117 @@ async function runLhDrain(state: BootstrapState): Promise<FlowResult> {
 }
 
 // --------------------------------------------------------------------------
+// Layer 10 scenario runners (D35 — one file per scenario)
+// --------------------------------------------------------------------------
+
+/**
+ * Resolves the absolute path to the workspace `bots/` directory + the
+ * scenario test file. Defensive against repository moves.
+ */
+function scenarioTestFile(scenarioNum: 1 | 2 | 3 | 4 | 5 | 6, name: string): string {
+  return join(REPO_ROOT, 'bots', '.e2e', `layer-10-scenario-${scenarioNum}-${name}.test.ts`);
+}
+
+/**
+ * Inline-exec hook for Scenario 1 (D35 + per-task-brief flag
+ * `SCENARIO_1_INLINE_EXEC=1`). When enabled and targeting localhost, shells
+ * out to the workspace's tsx test runner so the per-step assertions run
+ * in-band with the runner's output. When disabled, returns a structured
+ * `manual-run` notice matching the legacy per-flow runners.
+ */
+async function runScenario1(state: BootstrapState, artifactPath: string): Promise<FlowResult> {
+  const testPath = scenarioTestFile(1, 'happy-path');
+  if (!existsSync(testPath)) {
+    return {
+      flow: 'scenario-1',
+      status: 'skipped',
+      reason: `test file missing: ${testPath}`,
+    };
+  }
+
+  const inlineExec = process.env.SCENARIO_1_INLINE_EXEC === '1';
+  if (!inlineExec) {
+    return {
+      flow: 'scenario-1',
+      status: 'skipped',
+      reason:
+        `manual-run — set SCENARIO_1_INLINE_EXEC=1 to drive in-process, ` +
+        `or run \`npx tsx --test ${testPath}\``,
+      details: { test_file: testPath },
+    };
+  }
+
+  // Inline-exec: only meaningful for localhost target. Refuse devnet to keep
+  // the runner from inadvertently driving live state from a CI runner.
+  if (state.bootstrap_target !== 'localhost') {
+    return {
+      flow: 'scenario-1',
+      status: 'skipped',
+      reason: `inline-exec restricted to localhost (got ${state.bootstrap_target})`,
+    };
+  }
+
+  log('scenario-1', `inline-exec → tsx --test ${testPath}`);
+
+  // Forward the artifact path + RPC env to the test process. Inherit stdio
+  // so operator sees per-step TAP output. SEC: pass env explicitly rather
+  // than via shell expansion to avoid quoting issues with paths.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    E2E_BOOTSTRAP_ARTIFACT: artifactPath,
+    RPC_URL: state.rpc_url,
+  };
+  const tsxBin = join(REPO_ROOT, 'bots', 'node_modules', '.bin', 'tsx');
+  const tsxResolved = existsSync(tsxBin) ? tsxBin : 'tsx';
+  const result = spawnSync(tsxResolved, ['--test', testPath], {
+    cwd: REPO_ROOT,
+    env,
+    stdio: 'inherit',
+  });
+
+  if (result.error) {
+    return {
+      flow: 'scenario-1',
+      status: 'error',
+      reason: `spawn failed: ${result.error.message}`,
+    };
+  }
+  if (result.status !== 0) {
+    return {
+      flow: 'scenario-1',
+      status: 'error',
+      reason: `test process exited with code=${result.status} (signal=${result.signal ?? 'none'})`,
+    };
+  }
+  return {
+    flow: 'scenario-1',
+    status: 'ok',
+    reason: 'inline-exec passed',
+    details: { test_file: testPath },
+  };
+}
+
+/**
+ * Placeholder for Scenarios 2-6 — per D35, each scenario gets its own test
+ * file. Substeps 6/7/8 ship those files; until then, return a structured
+ * `manual-run` notice that points to the corresponding (yet-unshipped) path.
+ */
+function runScenarioPlaceholder(
+  num: 2 | 3 | 4 | 5 | 6,
+  name: string,
+): FlowResult {
+  const testPath = scenarioTestFile(num, name);
+  return {
+    flow: `scenario-${num}`,
+    status: 'skipped',
+    reason: existsSync(testPath)
+      ? `test file present but inline-exec hook not implemented (Substep 6/7/8 lands per scenario)`
+      : `test file not yet shipped: ${testPath}`,
+    details: { test_file: testPath },
+  };
+}
+
+// --------------------------------------------------------------------------
 // Orchestrator
 // --------------------------------------------------------------------------
 
@@ -272,7 +426,11 @@ interface RunReport {
   flows: FlowResult[];
 }
 
-async function runScenario(scenario: Scenario, state: BootstrapState): Promise<FlowResult[]> {
+async function runScenario(
+  scenario: Scenario,
+  state: BootstrapState,
+  artifactPath: string,
+): Promise<FlowResult[]> {
   const flows: FlowResult[] = [];
 
   if (scenario === 'full' || scenario === 'revenue-only') {
@@ -294,6 +452,41 @@ async function runScenario(scenario: Scenario, state: BootstrapState): Promise<F
   if (scenario === 'lh-drain') {
     log('orch', 'flow=lh-drain');
     flows.push(await runLhDrain(state));
+  }
+
+  // Layer 10 named scenarios (D35).
+  if (scenario === 'scenario-1' || scenario === 'all') {
+    log('orch', 'flow=scenario-1');
+    const s1Result = await runScenario1(state, artifactPath);
+    flows.push(s1Result);
+    // T-34 / SEC-78: halting --scenario all after Scenario 1 error — running
+    // the remaining placeholders against a half-broken happy path tends to
+    // mask the root cause and burns CI time. Fail-fast is the safer default
+    // for ops; operators who want to keep going can re-run individual scenarios.
+    if (scenario === 'all' && s1Result.status === 'error') {
+      warn('orch', 'halt-after-error — Scenario 1 failed; skipping S2..S6 placeholders');
+      return flows;
+    }
+  }
+  if (scenario === 'scenario-2' || scenario === 'all') {
+    log('orch', 'flow=scenario-2');
+    flows.push(runScenarioPlaceholder(2, 'governance'));
+  }
+  if (scenario === 'scenario-3' || scenario === 'all') {
+    log('orch', 'flow=scenario-3');
+    flows.push(runScenarioPlaceholder(3, 'dex-standard'));
+  }
+  if (scenario === 'scenario-4' || scenario === 'all') {
+    log('orch', 'flow=scenario-4');
+    flows.push(runScenarioPlaceholder(4, 'concentrated'));
+  }
+  if (scenario === 'scenario-5' || scenario === 'all') {
+    log('orch', 'flow=scenario-5');
+    flows.push(runScenarioPlaceholder(5, 'nexus'));
+  }
+  if (scenario === 'scenario-6' || scenario === 'all') {
+    log('orch', 'flow=scenario-6');
+    flows.push(runScenarioPlaceholder(6, 'emergency'));
   }
 
   return flows;
@@ -353,7 +546,11 @@ async function main(): Promise<void> {
   }
 
   log('main', `running scenario="${argv.scenario}"`);
-  const flows = await runScenario(argv.scenario, state);
+  // Resolve the artifact path so scenario test processes get the same
+  // canonical path the runner used (avoids races with relative resolution
+  // when shells out to a different cwd).
+  const artifactAbs = resolve(argv.artifact);
+  const flows = await runScenario(argv.scenario, state, artifactAbs);
 
   const report: RunReport = {
     generated_at_utc: new Date().toISOString(),
