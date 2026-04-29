@@ -3,6 +3,28 @@
 Operational tooling for the Areal Finance meta-repo. All scripts assume the
 working directory is the repo root unless noted otherwise.
 
+## Bootstrap orchestration (Layer 10)
+
+The Layer 10 deploy chain is rooted at `scripts/deploy.sh` — the 8-phase
+orchestrator that takes a fresh validator to a fully-running protocol with
+zero remaining deployer authority.
+
+| Script | Role |
+|---|---|
+| `scripts/deploy.sh` | 8-phase end-to-end orchestrator (deploy → R20 mint-pin → ARL OT → DEX pools → Nexus → bot wallets → authority transfers → bot startup). Idempotent on re-run; each phase reads the artifact and skips already-completed work. |
+| `scripts/migrate-mints.sh` | R20 RWT mint-pin migration tool (Substep 1). Rebuilds `yield-distribution` with the canonical RWT mint pinned in `constants.rs`. The compile-time tripwire fails the build if the dev-placeholder feature is left on. |
+| `scripts/lib/start-bots.ts` | Phase 8 bot orchestrator. Funds → spawns → heartbeat-verifies the 6 bots in defined order. R30 single-instance lock + bot-wallet → contract-surface mapping verification + on-chain liveness probe (publisher's `MerkleDistributor.merkle_root` zero → non-zero transition) gate Phase 8 completion. |
+| `scripts/lib/transfer-authority.ts` | Phase 7 atomic authority chain. Rotates all 5 contract-state authorities to the multisig and emits the deployer-zero-authority proof in two halves: a POSITIVE side (every contract authority == expected target) and a NEGATIVE side (deployer is not the authority anywhere). |
+| `scripts/lib/zero-authority-audit.ts` | Shared library — POSITIVE + NEGATIVE proofs of the deployer-zero-authority property. Used by `transfer-authority.ts` (final verification), the Layer 10 Scenario 6 emergency test, and `verify-deployment.sh` (audit checklist). Cross-coverage by design: a wrong field offset surfaces as a verdict divergence between consumers. |
+
+## Audit & reproducibility scripts (Layer 10 Substep 10)
+
+| Script | Role |
+|---|---|
+| `scripts/verify-deployment.sh` | 6-check cross-contract security audit. Verifies authority chain, R20 mint pin, bot fleet liveness, IDL parity, vanity ID drift, and config invariants. Emits `data/layer-10-audit-<UTC>.json` with structured per-check verdicts. |
+| `scripts/verify-fresh-deploy.sh` | Full reproducibility runner. Kills any running validator, wipes the ledger, runs `deploy.sh` end-to-end, executes the master E2E suite, and re-runs `verify-deployment.sh`. `--keep-ledger` flag short-circuits the wipe for re-runs against an already-deployed validator. |
+| `scripts/check-public-repo-readiness.sh` | Pre-tag grep gates for public repo hygiene. Gate 1 — no internal-planning path references; Gate 2 — no AI assistant attribution markers; Gate 5 — no `.env` files staged; Gate 6 — no leaked RPC URLs. Exits non-zero on any gate failure; intended to run as a pre-tag CI hook. |
+
 | Script | Purpose |
 |---|---|
 | `e2e-bootstrap.sh` | Single-command bootstrap from zero — provisions `solana-test-validator`, deploys the 5 programs at vanity IDs, runs on-chain init, generates bot keypairs + airdrops, renders bots' `.env` files. Layer 9 Substep 12. |

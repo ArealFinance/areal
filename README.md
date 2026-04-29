@@ -8,7 +8,7 @@ This repository is a **meta-repo** that aggregates the five components of Areal 
 - **Admin panel:** https://panel.areal.finance
 - **Twitter:** [@areal_finance](https://twitter.com/areal_finance)
 
-> **Layer 9 status (2026-04-27).** Layer 9 (Liquidity Nexus + protocol-owned liquidity) is **code-complete** and accepted across all 15 substeps. Mainnet deployment is gated on two external Layer 10 critical-path items: **R20** (RWT_MINT pin migration) and **R57** (dashboard IDL regen for the 9 new Nexus instructions). Layer 9 acceptance verdict: APPROVED with R20+R57 external. See [`docs.areal.finance/architecture/layer9-liquidity-nexus`](https://docs.areal.finance/architecture/layer9-liquidity-nexus) for the subsystem overview.
+> **Layer 10 status (2026-04-29).** Layer 10 (bootstrap orchestration + zero-deployer-authority handover + audit/reproducibility tooling) is **code-complete** and frozen. The R20 RWT_MINT pin migration shipped behind a compile-time tripwire (`cargo build-sbf` fails if the dev-placeholder mint feature is on for a production build). All five contract-state authorities rotate atomically to the multisig in Phase 7; deployer-zero-authority is verified post-rotation by both POSITIVE and NEGATIVE on-chain audits. See [`docs.areal.finance/architecture/layer10-bootstrap`](https://docs.areal.finance/architecture/layer10-bootstrap) for the deploy walkthrough.
 
 ---
 
@@ -76,7 +76,29 @@ RPC: [`http://rpc.areal.finance`](http://rpc.areal.finance) (proxies to a local 
 |---|---|
 | `merkle-publisher` | ✅ active |
 | `pool-rebalancer` | ✅ active |
-| Revenue crank, convert-and-fund crank, yield-claim crank, Nexus manager | 🚧 planned |
+| `revenue-crank` | ✅ active |
+| `convert-and-fund-crank` | ✅ active |
+| `yield-claim-crank` | ✅ active |
+| `nexus-manager` | ✅ active |
+
+All 6 bots are spawned in Phase 8 of `scripts/deploy.sh` after the authority chain lands; each runs under a `proper-lockfile` flock to prevent double-instance.
+
+## Bootstrap orchestration
+
+`scripts/deploy.sh` is the single end-to-end orchestrator that takes a fresh validator to a fully-running protocol with zero deployer authority remaining. Eight phases:
+
+| Phase | Step | Outcome |
+|---|---|---|
+| 1 | Deploy 5 contracts at vanity IDs | `.so` artifacts live on-chain |
+| 2 | R20 RWT mint pin migration | YD program rebuilt with the canonical RWT mint pinned (compile-time tripwire) |
+| 3 | ARL OT initialisation + revenue/distributor wiring | Singletons + ARL OT distributor seeded |
+| 4 | DEX pool creation (RWT/USDC + auxiliary) | Master pool live, Nexus deposit/withdraw routes resolvable |
+| 5 | Liquidity Nexus initialisation | Nexus singleton + manager rotation prepared |
+| 6 | Bot wallet provisioning | 6 keypair files + airdrops |
+| 7 | Authority transfer chain (atomic) | All 5 contract-state authorities rotated to multisig; POSITIVE + NEGATIVE audits land |
+| 8 | Bot startup | 6 bots spawned in defined ordering, on-chain liveness probe gates Phase 8 completion |
+
+See [`docs.areal.finance/architecture/layer10-bootstrap`](https://docs.areal.finance/architecture/layer10-bootstrap) for the full walkthrough.
 
 ---
 
