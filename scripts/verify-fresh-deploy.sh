@@ -99,7 +99,10 @@ start_validator() {
 
 run_deploy() {
   log "step 4: running scripts/deploy.sh"
-  bash "$SCRIPT_DIR/deploy.sh"
+  # By definition, fresh-deploy operates on the local test-validator we just
+  # spun up — set BOOTSTRAP_TARGET=localhost so e2e-bootstrap.sh's safety gate
+  # (which refuses devnet/mainnet) lets the deploy proceed.
+  BOOTSTRAP_TARGET=localhost bash "$SCRIPT_DIR/deploy.sh"
 }
 
 run_e2e() {

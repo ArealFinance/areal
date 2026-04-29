@@ -531,6 +531,15 @@ stage_init() {
 stage_bots() {
   stage_start "7/bots"
 
+  # Bootstrap the artifact file before populating the bots block, since this
+  # stage runs before stage_init (per the comment in main()). Idempotent: a
+  # warm restart preserves an existing artifact and refreshes deployer + RPC
+  # fields, mirroring stage_init's branch.
+  if [[ ! -f "$ARTIFACT_FILE" ]]; then
+    log "writing initial artifact: $ARTIFACT_FILE"
+    write_initial_artifact
+  fi
+
   # Append/update bots block in the artifact via an awk one-liner per bot.
   # Layer 10 substep 2: pool-rebalancer + rwt-manager added (R-J / D39). The
   # rwt-manager keypair lives under bots/convert-and-fund-crank/data/ because
