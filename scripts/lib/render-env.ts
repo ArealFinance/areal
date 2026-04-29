@@ -195,6 +195,15 @@ const BOTS: BotSpec[] = [
     }),
   },
   {
+    dir: 'pool-rebalancer',
+    keypairEnvVar: 'REBALANCER_KEYPAIR',
+    vars: (art) => ({
+      RPC_URL: art.rpc_url,
+      DEX_PROGRAM_ID: art.programs.native_dex,
+      RWT_ENGINE_PROGRAM_ID: art.programs.rwt_engine,
+    }),
+  },
+  {
     dir: 'merkle-publisher',
     // KMS_KEY_ID is path-based for local mode; bootstrap keeps the existing
     // local-mock-keypair.json target.

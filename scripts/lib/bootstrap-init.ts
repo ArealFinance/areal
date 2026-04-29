@@ -1792,7 +1792,10 @@ async function phaseDestinations(
   // mainnet root and must NEVER be hot-funded with revenue, so non-localhost
   // bootstraps MUST set CRANK_USDC_OWNER_PUBKEY to the dedicated forwarder /
   // multisig wallet that owns this ATA. On localhost (devnet rehearsal) we
-  // fall back to deployer-ownership for convenience.
+  // pick the convert-and-fund-crank bot keypair (the actual consumer of the
+  // Nexus revenue stream) so the crank ATA is distinct from the deployer's
+  // areal_fee_destination ATA — otherwise batch_update_destinations would
+  // reject the destination with FeeDestinationCollision (SD-33).
   let crankOwner: PublicKey;
   const overrideOwner = process.env.CRANK_USDC_OWNER_PUBKEY;
   if (overrideOwner) {
@@ -1812,7 +1815,26 @@ async function phaseDestinations(
           `10% of OT revenue into the mainnet root key.`,
       );
     }
-    crankOwner = deployer.publicKey;
+    // SD-33: prefer convert-and-fund-crank bot keypair on localhost — it
+    // consumes the Nexus revenue stream + its USDC ATA is distinct from
+    // areal_fee_destination (which is owned by deployer per phase-b).
+    const cfBot = art.bots?.['convert-and-fund-crank'];
+    if (cfBot?.pubkey) {
+      try {
+        crankOwner = new PublicKey(cfBot.pubkey);
+        log('phase-j', `crank USDC owner: convert-and-fund-crank bot ${crankOwner.toBase58()}`);
+      } catch {
+        throw new Error(
+          `phase-j FATAL: convert-and-fund-crank pubkey "${cfBot.pubkey}" not a valid base58`,
+        );
+      }
+    } else {
+      throw new Error(
+        `phase-j FATAL: convert-and-fund-crank bot keypair missing — stage_bots must run before ` +
+          `stage_init. Cannot fall back to deployer because the deployer's USDC ATA collides ` +
+          `with areal_fee_destination (FeeDestinationCollision in batch_update_destinations).`,
+      );
+    }
   }
   const crankUsdcAta = await ensureAta(conn, deployer, usdcMint, crankOwner);
   art.pdas = {

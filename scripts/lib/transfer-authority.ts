@@ -608,23 +608,45 @@ async function runRbPrecheck(
   }
   log(stage, `OtGovernance.authority == deployer (OK)`);
 
-  // (b) Deployer ARL ATA balance MUST be > 0 — phaseArlMint must have run.
-  if (!art.mints?.arl_ot_mint) {
+  // (b) ARL OT total supply MUST be > 0 — phaseArlMint must have run.
+  // SD-34: Originally this read `findAta(deployer.publicKey, arlMint)` and
+  // expected the balance there to exceed the threshold. That assumption was
+  // wrong by design — phaseArlMint mints via OT::mint_ot to the OT-contract-
+  // controlled mint at art.ots[ARL_OT_INDEX].ot_mint (created in phase-g),
+  // NOT to art.mints.arl_ot_mint (which is a USDC-decimal placeholder from
+  // phase-a, never used as the live ARL). Replace the deployer-ATA check
+  // with a Mint.supply read on the correct mint pubkey — the semantically
+  // correct way to assert "phaseArlMint produced supply".
+  const arlOtRecord = art.ots?.[ARL_OT_INDEX];
+  if (!arlOtRecord?.ot_mint) {
     throw new Error(
-      `phase-7 FATAL: artifact.mints.arl_ot_mint missing — ARL mint not created`,
+      `phase-7 FATAL: artifact.ots[${ARL_OT_INDEX}].ot_mint missing — ARL OT not created (phase-g)`,
     );
   }
-  const arlMint = new PublicKey(art.mints.arl_ot_mint);
-  const ata = findAta(deployer.publicKey, arlMint);
-  const balance = await getTokenBalance(conn, ata);
-  if (balance < ARL_INITIAL_SUPPLY_MIN) {
+  const arlMint = new PublicKey(arlOtRecord.ot_mint);
+  const mintInfo = await conn.getAccountInfo(arlMint);
+  if (!mintInfo) {
     throw new Error(
-      `phase-7 FATAL: ARL OT supply == 0 in deployer ATA ${ata.toBase58()} — ` +
-        `phaseArlMint did not run; R-B violation. Authority transfer would ` +
-        `permanently strand the mint authority on Futarchy.`,
+      `phase-7 FATAL: ARL mint ${arlMint.toBase58()} not on-chain — phaseArlMint did not run`,
     );
   }
-  log(stage, `deployer ARL ATA balance=${balance.toString()} (OK)`);
+  // SPL Mint layout: 0..36 mint_authority(36), 36..44 supply(u64 LE),
+  //                  44 decimals(u8), 45 is_initialized(u8), 46..82 freeze_auth(36).
+  if (mintInfo.data.length < 44) {
+    throw new Error(
+      `phase-7 FATAL: ARL mint ${arlMint.toBase58()} data length=${mintInfo.data.length} ` +
+        `(expected ≥44 for SPL Mint layout)`,
+    );
+  }
+  const supply = mintInfo.data.readBigUInt64LE(36);
+  if (supply < ARL_INITIAL_SUPPLY_MIN) {
+    throw new Error(
+      `phase-7 FATAL: ARL OT total supply=${supply.toString()} < threshold ` +
+        `${ARL_INITIAL_SUPPLY_MIN.toString()} — phaseArlMint did not run; R-B violation. ` +
+        `Authority transfer would permanently strand the mint authority on Futarchy.`,
+    );
+  }
+  log(stage, `ARL OT total supply=${supply.toString()} (OK)`);
 
   // (c) SEC-42 — extend the precheck to read all 5 deployer-as-authority
   // states. The dual of `assertAuthorityChainComplete`: deployer-as-authority
@@ -681,13 +703,18 @@ async function transferOtToFutarchy(
       `${stage}: arlOt.futarchy_config_pda missing — phaseFutarchy did not run`,
     );
   }
-  if (!art.mints?.arl_ot_mint) {
-    throw new Error(`${stage}: art.mints.arl_ot_mint missing`);
+  // SD-34 follow-up: the live ARL OT mint is at arlOt.ot_mint (created in
+  // bootstrap-init phase-g), NOT at art.mints.arl_ot_mint (which is a
+  // USDC-decimal placeholder created in phase-a and never used as the live
+  // ARL). The contract derives ot_governance PDA from this mint pubkey, so
+  // mixing the two produces "PDA mismatch for 'ot_governance'".
+  if (!arlOt.ot_mint) {
+    throw new Error(`${stage}: arlOt.ot_mint missing — phase-g did not run`);
   }
 
   const otProgramId = new PublicKey(art.programs.ownership_token);
   const futProgramId = new PublicKey(art.programs.futarchy);
-  const arlMint = new PublicKey(art.mints.arl_ot_mint);
+  const arlMint = new PublicKey(arlOt.ot_mint);
   const otGovPda = new PublicKey(arlOt.ot_governance_pda);
   const futConfigPda = new PublicKey(arlOt.futarchy_config_pda);
 
