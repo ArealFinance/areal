@@ -1,0 +1,25 @@
+# Pre-commit hook config (R8 — Layer 8 carry-forward).
+#
+# Install once: `pip install pre-commit && pre-commit install`.
+# Then every `git commit` runs the hooks before the commit lands.
+#
+# CI parity: the same hooks should also run on PR via GitHub Actions
+# (separate workflow) so a developer who skipped pre-commit doesn't
+# slip past the gate.
+#
+# To run manually against the whole tree: `pre-commit run --all-files`.
+# To skip a hook on one commit: `SKIP=gitleaks git commit -m "..."`
+# (but only with explicit reason — bypassing leaks tools should be rare).
+
+repos:
+  # gitleaks — secret scanning across the working tree + commit diff.
+  # Catches API keys, private keys, signed JWTs, AWS creds, etc.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        # Default config scans the staged diff. We point at our local
+        # .gitleaks.toml for an additional allowlist (test fixtures,
+        # bot vanity keypairs that are safe to commit, .env.example
+        # placeholders).
+        args: ["--config", ".gitleaks.toml", "protect", "--staged", "--verbose"]

@@ -57,6 +57,7 @@
 import * as fs from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -798,11 +799,17 @@ function spawnBot(
     // Non-POSIX filesystem — best-effort.
   }
 
-  // Use fixed argv array — never shell-string concat, prevents injection
-  // even if a future refactor introduces user-controlled bot names.
-  const argv: string[] = ['run', spec.npmScript];
+  // R-76: spawn tsx directly instead of npm-run-script. The npm hop adds a
+  // wrapper PID + child process tree that complicated the cmdline-based
+  // liveness check (SEC-72 / A-52 fixed via lsof but the npm hop is still
+  // dead weight). Direct tsx invocation produces ONE node-via-tsx process
+  // whose cwd matches the bot dir + whose argv contains src/index.ts —
+  // both queryable via lsof and ps for unambiguous liveness checks.
+  // tsx is workspace-hoisted under bots/node_modules/.bin/.
+  const tsxBin = resolve(REPO_ROOT, 'bots', 'node_modules', '.bin', 'tsx');
+  const argv: string[] = ['src/index.ts'];
 
-  const proc = spawn('npm', argv, {
+  const proc = spawn(tsxBin, argv, {
     cwd,
     detached: true, // survive the orchestrator process exit
     stdio: ['ignore', out, err],
@@ -876,10 +883,18 @@ function isProcessAlive(pid: number): boolean {
 function isOurBotAlive(pid: number, expectedCwd: string): boolean {
   try {
     if (!isProcessAlive(pid)) return false;
-    // `lsof -p <pid> -d cwd -Fn` outputs:
+    // `lsof -a -p <pid> -d cwd -Fn` outputs:
     //   p<pid>\nfcwd\nn<absolute-path-of-cwd>\n
     // We extract the line starting with 'n' (the n-field).
-    const out = execFileSync('lsof', ['-p', String(pid), '-d', 'cwd', '-Fn'], {
+    //
+    // R-75 follow-up: the `-a` flag is REQUIRED. Without it, lsof OR's
+    // the selection criteria (-p AND -d) so `-p X -d cwd` matches every
+    // process with a cwd file descriptor (i.e., every process), not just
+    // the target pid. Pre-existing bug surfaced when R-76 switched spawn
+    // from `npm run start` to direct tsx — the old npm-wrapper happened
+    // to set its cwd to '/' which ALSO mismatched expectedCwd, so the
+    // bug was masked as "always false" rather than "wrong process matched".
+    const out = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
       encoding: 'utf8',
       timeout: 2000,
     });
@@ -1056,7 +1071,12 @@ async function verifyHeartbeats(spawned: SpawnedBot[]): Promise<void> {
 
   const dead: SpawnedBot[] = [];
   for (const sb of spawned) {
-    const alive = isProcessAlive(sb.pid);
+    // R-75: use isOurBotAlive(pid, cwd) — unsafe to rely on bare
+    // isProcessAlive(pid) because the PID may have been recycled by the
+    // OS to another process (e.g., a system daemon) between spawn and
+    // heartbeat. The cwd check confirms it's still our bot.
+    const cwd = resolve(REPO_ROOT, 'bots', sb.spec.dir);
+    const alive = isOurBotAlive(sb.pid, cwd);
     log(
       stage,
       `${sb.spec.name.padEnd(25)} pid=${sb.pid} alive=${alive} log=${sb.logFile}`,
@@ -1287,6 +1307,81 @@ function parsePositiveInt(
   return n;
 }
 
+// --------------------------------------------------------------------------
+// R-78 — phase-8 concurrent-run guard
+//
+// PID-file lock at data/.phase8.lock prevents two operator-double-clicks /
+// CI retries from racing through stage_1_fund + stage_2_spawn and producing
+// 12 bot processes (6 from each invocation; last-writer-wins on the artifact
+// → 6 PIDs in artifact + 6 orphan duplicates).
+//
+// O_EXCL on open() makes the create branch race-free between two parallel
+// processes — the loser sees ENOENT-style EEXIST and fails fast.
+// --------------------------------------------------------------------------
+
+const PHASE8_LOCK_STALE_MS = 60_000;
+
+interface Phase8LockHandle {
+  path: string;
+  acquiredAt: number;
+}
+
+function acquirePhase8Lock(dataDir: string): Phase8LockHandle {
+  mkdirSync(dataDir, { recursive: true });
+  const lockPath = join(dataDir, '.phase8.lock');
+  const now = Date.now();
+
+  // Attempt the race-free O_EXCL create first.
+  try {
+    const fd = openSync(lockPath, 'wx');
+    writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: now }), { flag: 'w' });
+    closeSync(fd);
+    log('phase-8-lock', `acquired ${lockPath} pid=${process.pid}`);
+    return { path: lockPath, acquiredAt: now };
+  } catch (e: unknown) {
+    if (!(e instanceof Error) || (e as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw e;
+    }
+  }
+
+  // Lock present — check if it's stale (process dead or older than threshold).
+  let payload: { pid?: number; startedAt?: number } = {};
+  try {
+    payload = JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch {
+    // Corrupt lock file — treat as stale.
+  }
+
+  const stalePid = !payload.pid || (() => {
+    try { process.kill(payload.pid!, 0); return false; } catch { return true; }
+  })();
+  const staleAge = !payload.startedAt || (now - payload.startedAt > PHASE8_LOCK_STALE_MS);
+
+  if (stalePid && staleAge) {
+    log('phase-8-lock', `reclaiming stale lock at ${lockPath} (pid=${payload.pid ?? '?'} age=${payload.startedAt ? now - payload.startedAt : '?'}ms)`);
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: now }));
+    return { path: lockPath, acquiredAt: now };
+  }
+
+  throw new Error(
+    `phase-8 FATAL: data/.phase8.lock held by pid=${payload.pid ?? '?'} ` +
+      `(startedAt=${payload.startedAt ?? '?'}). Another start-bots is running ` +
+      `or crashed within the last ${PHASE8_LOCK_STALE_MS}ms — wait or remove ` +
+      `${lockPath} manually after confirming no orphan bots.`,
+  );
+}
+
+function releasePhase8Lock(handle: Phase8LockHandle): void {
+  try {
+    if (existsSync(handle.path)) {
+      unlinkSync(handle.path);
+      log('phase-8-lock', `released ${handle.path}`);
+    }
+  } catch {
+    // Best-effort.
+  }
+}
+
 async function main(): Promise<void> {
   const argv = parseArgv();
   log('main', `loading artifact ${argv.artifact}`);
@@ -1299,6 +1394,17 @@ async function main(): Promise<void> {
   const conn = new Connection(art.rpc_url, 'confirmed');
   const deployer = loadKeypair(art.deployer_keypair_path);
   log('main', `deployer=${deployer.publicKey.toBase58()}, rpc=${art.rpc_url}`);
+
+  // R-78: acquire phase-8 concurrent-run lock before any spawn / fund work.
+  // Released on success, on throw (catch + rethrow), and on SIGINT/SIGTERM
+  // via the signal-cleanup handler so the lock doesn't outlive the process.
+  const lockHandle = acquirePhase8Lock(dirname(argv.artifact));
+  const sigCleanup = () => {
+    releasePhase8Lock(lockHandle);
+    process.exit(130);
+  };
+  process.on('SIGINT', sigCleanup);
+  process.on('SIGTERM', sigCleanup);
 
   // T-22 / SEC-61: persist the artifact even on partial failure. Without this,
   // a throw in stage 2 (e.g., 4th bot failed to spawn) would leave the disk
@@ -1330,6 +1436,10 @@ async function main(): Promise<void> {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[start-bots] WARN: final artifact persist failed: ${msg}`);
     }
+    // R-78: release phase-8 lock so a re-run can proceed. Idempotent.
+    releasePhase8Lock(lockHandle);
+    process.removeListener('SIGINT', sigCleanup);
+    process.removeListener('SIGTERM', sigCleanup);
   }
 }
 

@@ -1,0 +1,55 @@
+# gitleaks config (R8 — Layer 8 carry-forward).
+#
+# Extends the default ruleset with project-specific allowlist entries so
+# legitimate keypair fixtures + .env.example placeholders don't trip
+# the secret scanner.
+#
+# Default rules are inherited from gitleaks' built-in detectors:
+# https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+
+title = "Areal Finance gitleaks config"
+
+# Inherit the default ruleset (so we don't have to redefine every detector).
+# The allowlist below ADDS to the default.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Project-wide allowlist for fixtures + documented placeholders"
+
+# Paths that are safe to commit (test fixtures + documented examples).
+paths = [
+  # All `.env.example` files contain placeholder values that match secret
+  # patterns by design (we don't want gitleaks to redact them).
+  '''\.env\.example$''',
+  # Vanity keypair JSON files for program addresses (5 contracts).
+  # These are PUBLIC keypairs meant to be committed — they pin program
+  # IDs across deployments and are validated against on-chain state.
+  # SECRET keypairs (deployer, bot wallets) are gitignored separately.
+  '''^keys/vanity/.*\.json$''',
+  # Test fixtures — known hashes, mock signatures, etc.
+  '''^bots/\.e2e/fixtures/''',
+  # Bot mock keypairs used only for local-validator dress rehearsals.
+  # Real production keys live in KMS (R6) and never touch the repo.
+  '''^bots/merkle-publisher/local-mock-keypair\.json$''',
+]
+
+# Specific regex patterns to allow (e.g., placeholder bytes in source).
+regexes = [
+  # The R20 dev-placeholder mint vanity bytes embedded in
+  # contracts/yield-distribution/src/constants.rs (and OT/native-dex
+  # constants) — these are PUBLIC vanity addresses pinned at compile
+  # time, replaced via scripts/migrate-mints.sh in R20 closure.
+  '''dev-placeholder-mints''',
+  # Known program IDs (5 vanity addresses) — public + immutable.
+  '''oWnqbNwmEdjNS5KVbxz8xeuGNjKMd1aiNF89d7qdARL''',
+  '''DEX8LmvJpjefPS1cGS9zWB9ybxN24vNjTTrusBeqyARL''',
+  '''RWT9hgbjHQDj98xP7FYsT5QYp5X32XyK6QfMRmFtARL''',
+  '''YLD9EBikcTmVCnVzdx6vuNajrDkp8tyCAgZrqTwmMXF''',
+  '''FUTsbsdyJmEWa5LSYHWXMr9hQFyVsrJ1agGvRQGR1ARL''',
+]
+
+# Stop words — commits with these in the file path are scanned with
+# extra rigor. Useful when reviewing changes to security-sensitive areas.
+# (Empty for now — defaults are fine.)
+stopwords = []
