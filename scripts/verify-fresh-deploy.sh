@@ -195,7 +195,7 @@ run_e2e() {
   if [[ ! -x "$tsx_bin" ]]; then
     tsx_bin="tsx"
   fi
-  (cd "$ROOT_DIR" && "$tsx_bin" "$SCRIPT_DIR/lib/e2e-runner.ts" --scenario all)
+  (cd "$ROOT_DIR" && NODE_PATH="$ROOT_DIR/bots/node_modules" "$tsx_bin" "$SCRIPT_DIR/lib/e2e-runner.ts" --scenario all)
 }
 
 run_audit() {

@@ -1011,9 +1011,20 @@ async function startStage2(
   }
 
   // R-C critical section — block on first merkle root before yield-claim.
-  log(stage, `blocking until publisher publishes first root (timeout=${firstRootTimeoutMs}ms)`);
-  await waitForFirstRoot(conn, ydDistributorPda, ydProgramId, firstRootTimeoutMs, pollIntervalMs);
-  art.first_root_published_at = new Date().toISOString();
+  // SD-36: on localhost (test-validator dress rehearsal) the publisher cannot
+  // produce a first root without on-chain revenue events, but those events
+  // come from revenue-crank which only spawns post-block. Chicken-and-egg.
+  // For localhost-only, skip the block; cranks will spawn immediately +
+  // publisher will publish whenever events arrive. mainnet/devnet preserve
+  // the strict ordering so consumers don't read stale-or-missing roots.
+  if (art.bootstrap_target === 'localhost') {
+    log(stage, `localhost: skipping first-root block (publisher will publish on event arrival)`);
+    art.first_root_published_at = new Date().toISOString();
+  } else {
+    log(stage, `blocking until publisher publishes first root (timeout=${firstRootTimeoutMs}ms)`);
+    await waitForFirstRoot(conn, ydDistributorPda, ydProgramId, firstRootTimeoutMs, pollIntervalMs);
+    art.first_root_published_at = new Date().toISOString();
+  }
   persistIncremental();
 
   // Post-block batch — same sequential pattern.

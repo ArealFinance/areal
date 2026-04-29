@@ -2299,10 +2299,10 @@ async function phaseRegisterBots(
   await registerDexRebalancer(conn, deployer, art, bots, skipped);
 
   // ---- Sub-phase 3: verify YD publish_authority (no-op confirmation) ----
-  await verifyYdPublishAuthority(conn, art);
+  await verifyYdPublishAuthority(conn, deployer, art);
 
   // ---- Sub-phase 4: verify nexus.manager (no-op confirmation) ----
-  await verifyNexusManager(conn, art);
+  await verifyNexusManager(conn, deployer, art);
 
   art.init_skipped = skipped;
 }
@@ -2475,7 +2475,11 @@ async function registerDexRebalancer(
   }
 }
 
-async function verifyYdPublishAuthority(conn: Connection, art: Artifact): Promise<void> {
+async function verifyYdPublishAuthority(
+  conn: Connection,
+  deployer: Keypair,
+  art: Artifact,
+): Promise<void> {
   if (!art.pdas?.yd_dist_config) return;
   const info = await conn.getAccountInfo(new PublicKey(art.pdas.yd_dist_config));
   if (!info) {
@@ -2495,11 +2499,50 @@ async function verifyYdPublishAuthority(conn: Connection, art: Artifact): Promis
     return;
   }
   const current = info.data.subarray(PA_OFFSET, PA_OFFSET + 32);
-  const pubkey = new PublicKey(current);
-  log('phase-m', `YD publish_authority = ${pubkey.toBase58()} (set at Phase 2; rotate via update_publish_authority)`);
+  const currentPubkey = new PublicKey(current);
+
+  const targetBot = art.bots?.['merkle-publisher'];
+  if (!targetBot?.pubkey) {
+    log('phase-m', `YD publish_authority = ${currentPubkey.toBase58()} (no merkle-publisher bot keypair to rotate)`);
+    return;
+  }
+  const target = new PublicKey(targetBot.pubkey);
+  if (currentPubkey.equals(target)) {
+    log('phase-m', `YD publish_authority already = merkle-publisher (${target.toBase58()}); skipping`);
+    return;
+  }
+
+  // SD-36: rotate publish_authority deployer -> merkle-publisher pubkey so
+  // verify-deployment.sh check 4 sees the bot registered. Mainnet ceremony
+  // performs the same rotation pre-Phase-7 (deployer is still authority here).
+  const ydProgramId = new PublicKey(art.programs.yield_distribution);
+  const ydIdl = loadIdl('yield-distribution');
+  if (!ixExists(ydIdl, 'update_publish_authority')) {
+    warn('phase-m', 'YD IDL missing update_publish_authority; skipping rotation');
+    return;
+  }
+  try {
+    const ydClient = new ArlexClient(loadIdlForClient('yield-distribution'), ydProgramId, conn);
+    const tx = ydClient.buildTransaction('update_publish_authority', {
+      accounts: {
+        authority: deployer.publicKey,
+        config: new PublicKey(art.pdas.yd_dist_config),
+      },
+      args: { new_publish_authority: Array.from(target.toBytes()) },
+    });
+    await sendAndConfirm(conn, tx, [deployer]);
+    log('phase-m', `YD::update_publish_authority OK (publisher=${target.toBase58()})`);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    warn('phase-m', `update_publish_authority failed: ${msg}`);
+  }
 }
 
-async function verifyNexusManager(conn: Connection, art: Artifact): Promise<void> {
+async function verifyNexusManager(
+  conn: Connection,
+  deployer: Keypair,
+  art: Artifact,
+): Promise<void> {
   if (!art.pdas?.liquidity_nexus) return;
   const info = await conn.getAccountInfo(new PublicKey(art.pdas.liquidity_nexus));
   if (!info) {
@@ -2512,8 +2555,44 @@ async function verifyNexusManager(conn: Connection, art: Artifact): Promise<void
     return;
   }
   const current = info.data.subarray(8, 8 + 32);
-  const pubkey = new PublicKey(current);
-  log('phase-m', `Nexus manager = ${pubkey.toBase58()} (set at Phase 5; rotate via update_nexus_manager)`);
+  const currentPubkey = new PublicKey(current);
+
+  const targetBot = art.bots?.['nexus-manager'];
+  if (!targetBot?.pubkey) {
+    log('phase-m', `Nexus manager = ${currentPubkey.toBase58()} (no nexus-manager bot keypair to rotate)`);
+    return;
+  }
+  const target = new PublicKey(targetBot.pubkey);
+  if (currentPubkey.equals(target)) {
+    log('phase-m', `Nexus.manager already = nexus-manager (${target.toBase58()}); skipping`);
+    return;
+  }
+
+  // SD-36: rotate Nexus.manager deployer -> nexus-manager pubkey so
+  // verify-deployment.sh check 4 sees the bot registered. Mainnet ceremony
+  // performs the same rotation pre-Phase-7 (deployer is still authority).
+  const dexProgramId = new PublicKey(art.programs.native_dex);
+  const dexIdl = loadIdl('native-dex');
+  if (!ixExists(dexIdl, 'update_nexus_manager')) {
+    warn('phase-m', 'DEX IDL missing update_nexus_manager; skipping rotation');
+    return;
+  }
+  try {
+    const dexClient = new ArlexClient(loadIdlForClient('native-dex'), dexProgramId, conn);
+    const tx = dexClient.buildTransaction('update_nexus_manager', {
+      accounts: {
+        authority: deployer.publicKey,
+        dex_config: new PublicKey(art.pdas!.dex_config),
+        liquidity_nexus: new PublicKey(art.pdas.liquidity_nexus),
+      },
+      args: { new_manager: Array.from(target.toBytes()) },
+    });
+    await sendAndConfirm(conn, tx, [deployer]);
+    log('phase-m', `DEX::update_nexus_manager OK (manager=${target.toBase58()})`);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    warn('phase-m', `update_nexus_manager failed: ${msg}`);
+  }
 }
 
 // --------------------------------------------------------------------------

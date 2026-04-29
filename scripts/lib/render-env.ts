@@ -121,7 +121,7 @@ const BOTS: BotSpec[] = [
       DB_PATH: './data/checkpoint.db',
       CHECK_INTERVAL_SECS: '60',
       LOG_LEVEL: 'info',
-      SEND_TX: 'false',
+      SEND_TX: art.bootstrap_target === 'localhost' ? 'true' : 'false',
     }),
   },
   {
@@ -146,7 +146,7 @@ const BOTS: BotSpec[] = [
       CHECK_INTERVAL_SECS: '60',
       MIN_CONVERT_USDC: '1000000',
       LOG_LEVEL: 'info',
-      SEND_TX: 'false',
+      SEND_TX: art.bootstrap_target === 'localhost' ? 'true' : 'false',
     }),
   },
   {
@@ -170,7 +170,7 @@ const BOTS: BotSpec[] = [
       COMPUTE_UNIT_PRICE_MICROLAMPORTS: '10000',
       DB_PATH: './data/checkpoint.db',
       LOG_LEVEL: 'info',
-      SEND_TX: 'false',
+      SEND_TX: art.bootstrap_target === 'localhost' ? 'true' : 'false',
     }),
   },
   {
@@ -191,7 +191,7 @@ const BOTS: BotSpec[] = [
       RWT_MINT: art.mints?.rwt_mint ?? '',
       NEXUS_MANAGED_POOLS: art.pdas?.master_pool ?? '',
       LOG_LEVEL: 'info',
-      SEND_TX: 'false',
+      SEND_TX: art.bootstrap_target === 'localhost' ? 'true' : 'false',
     }),
   },
   {
