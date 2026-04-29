@@ -86,11 +86,30 @@ git_grep_gate() {
 echo "[check-public-repo-readiness] starting"
 echo "target	gate	status	detail"
 
+# Self-exclude this gate script — it contains the literal forbidden patterns
+# in its own regex sources (plan/layer- + AI-attribution token list). The
+# gates remain authoritative for everything else in the meta-repo.
+GATE_SCRIPT_PATH="scripts/check-public-repo-readiness.sh"
+
 for target in "${TARGETS[@]}"; do
   label="$(target_label "$target")"
 
   # ----- Gate 1: plan/layer-* references -----
-  git_grep_gate "$target" "$label" "gate1_plan_refs" 'plan/layer-' || true
+  if [[ -d "$target/.git" || -f "$target/.git" ]]; then
+    plan_hits="$(git -C "$target" ls-files \
+      | grep -vF "$GATE_SCRIPT_PATH" \
+      | (cd "$target" && tr '\n' '\0' | xargs -0 grep -lE 'plan/layer-' 2>/dev/null) \
+      || true)"
+    if [[ -n "$plan_hits" ]]; then
+      printf '%s\t%s\tFAIL\t%d hit(s)\n' "$label" "gate1_plan_refs" "$(echo "$plan_hits" | wc -l | tr -d ' ')"
+      echo "$plan_hits" | sed "s|^|  $label: |" >&2
+      failures=$((failures + 1))
+    else
+      printf '%s\t%s\tPASS\n' "$label" "gate1_plan_refs"
+    fi
+  else
+    printf '%s\t%s\tSKIP\t(not a git checkout)\n' "$label" "gate1_plan_refs"
+  fi
 
   # ----- Gate 2: AI / Claude markers -----
   # Pattern is case-insensitive (-i flag baked in via ERE alternation +
@@ -99,6 +118,7 @@ for target in "${TARGETS[@]}"; do
   hits=""
   if [[ -d "$target/.git" || -f "$target/.git" ]]; then
     hits="$(git -C "$target" ls-files \
+      | grep -vF "$GATE_SCRIPT_PATH" \
       | (cd "$target" && tr '\n' '\0' | xargs -0 grep -liE 'claude\.ai|anthropic|co-authored-by|claude-code|claude opus|claude sonnet' 2>/dev/null) \
       || true)"
   fi
