@@ -64,3 +64,16 @@ bots/merkle-publisher/*.db
 bots/merkle-publisher/*.db-journal
 bots/merkle-publisher/*.db-wal
 bots/merkle-publisher/*.db-shm
+
+# === R46 transitional working dir (Layer 10 closure) ===
+# Local copy of arlex framework with the Box<T> Context.accounts fix,
+# wired in via cargo [patch] until the fix lands in ArealFinance/arlex
+# main + a new tag is published. Once that ships, this dir + the
+# corresponding [patch] block in contracts/Cargo.toml are removed.
+.r46-arlex-workdir/
+
+# === verify-deployment.sh transient driver (R46 audit-lib invocation) ===
+# A .cts file is generated under bots/ for each audit run + cleaned up
+# afterwards (per Sec M-2 ESM/CJS interop workaround).
+bots/.audit-lib-driver.cts
+bots/.audit-lib-driver.mts
