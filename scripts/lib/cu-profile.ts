@@ -191,10 +191,18 @@ interface IxRegistration {
   gate: Gate;
   build: (ctx: IxBuildContext) => TransactionInstruction | null;
   signers: (ctx: IxBuildContext) => Keypair[];
+  /**
+   * R-63: surfaces which entries are synthetic vs live for CU-profile
+   * downstream consumers. Currently every registry entry is a discriminator-
+   * only skeleton (the handler reverts but still reports CU + logs) — the
+   * flag exists so a future entry that wires real state can flip it to
+   * `false` without changing JSON consumers.
+   */
+  synthetic_skeleton: boolean;
 }
 
 /**
- * IxRegistry — 11 entries (5 Layer 8 + 6 Layer 9 nexus_* + claim_lp_fees + LH-drain).
+ * IxRegistry — 16 entries (5 Layer 8 + 9 Layer 9 nexus_* + claim_lp_fees + withdraw_liquidity_holding).
  *
  * Many of these require non-trivial off-chain account preparation (proofs,
  * compounds, vested funding state). For a CU PROFILE, we only need to land
@@ -232,6 +240,7 @@ const REGISTRY: readonly IxRegistration[] = [
       });
     },
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'claim_yield',
@@ -252,6 +261,7 @@ const REGISTRY: readonly IxRegistration[] = [
       });
     },
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'compound_yield',
@@ -272,6 +282,7 @@ const REGISTRY: readonly IxRegistration[] = [
       });
     },
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'claim_yd_for_treasury',
@@ -292,6 +303,7 @@ const REGISTRY: readonly IxRegistration[] = [
       });
     },
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'convert_to_rwt',
@@ -312,6 +324,7 @@ const REGISTRY: readonly IxRegistration[] = [
       });
     },
     signers: () => [],
+    synthetic_skeleton: true,
   },
 
   // ----------------------- Layer 9 (6 R57-gated + 2 special) -----------------------
@@ -321,6 +334,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'initialize_nexus'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'update_nexus_manager',
@@ -328,6 +342,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'update_nexus_manager'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'nexus_swap',
@@ -335,6 +350,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'nexus_swap'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'nexus_add_liquidity',
@@ -342,6 +358,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'nexus_add_liquidity'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'nexus_remove_liquidity',
@@ -349,6 +366,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'nexus_remove_liquidity'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'nexus_deposit',
@@ -356,6 +374,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'nexus_deposit'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'nexus_record_deposit',
@@ -363,6 +382,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'nexus_record_deposit'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'nexus_withdraw_profits',
@@ -370,6 +390,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'nexus_withdraw_profits'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'nexus_claim_rewards',
@@ -377,6 +398,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R57',
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'nexus_claim_rewards'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'claim_lp_fees',
@@ -384,6 +406,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: null,
     build: (ctx) => buildSimpleIxStub(ctx, 'native_dex', 'claim_lp_fees'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
   {
     name: 'withdraw_liquidity_holding',
@@ -391,6 +414,7 @@ const REGISTRY: readonly IxRegistration[] = [
     gate: 'R20',
     build: (ctx) => buildSimpleIxStub(ctx, 'yield_distribution', 'withdraw_liquidity_holding'),
     signers: () => [],
+    synthetic_skeleton: true,
   },
 ];
 
@@ -470,6 +494,11 @@ interface IxResult {
   stackOverflowCount: number;
   /** Sample log lines that triggered the R46 detector (truncated). */
   stackOverflowLogs: string[];
+  /**
+   * R-63: mirrors `IxRegistration.synthetic_skeleton`. Downstream CU-profile
+   * consumers (dashboards, audit reports) use this flag to label each row.
+   */
+  synthetic_skeleton: boolean;
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -508,6 +537,7 @@ async function profileOne(
       cuReadings: [],
       stackOverflowCount: 0,
       stackOverflowLogs: [],
+      synthetic_skeleton: reg.synthetic_skeleton,
     };
   }
 
@@ -522,6 +552,7 @@ async function profileOne(
       cuReadings: [],
       stackOverflowCount: 0,
       stackOverflowLogs: [],
+      synthetic_skeleton: reg.synthetic_skeleton,
     };
   }
 
@@ -581,6 +612,7 @@ async function profileOne(
       cuReadings: [],
       stackOverflowCount,
       stackOverflowLogs,
+      synthetic_skeleton: reg.synthetic_skeleton,
     };
   }
 
@@ -596,6 +628,7 @@ async function profileOne(
     max: sorted[sorted.length - 1]!,
     stackOverflowCount,
     stackOverflowLogs,
+    synthetic_skeleton: reg.synthetic_skeleton,
   };
 }
 

@@ -18,5 +18,6 @@
       "@solana/web3.js": ["bots/node_modules/@solana/web3.js"]
     }
   },
-  "include": ["./*.ts"]
+  "include": ["./*.ts"],
+  "exclude": ["./*.test.ts"]
 }

@@ -53,6 +53,19 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PublicKey } from '@solana/web3.js';
 
+// R-66 — gate logic + per-flow JSON shaping live in a single module so
+// future consumers (verify-deployment.sh, CI bots) can reuse the same
+// `gated:r20` / `gated:r57` semantics without forking the runner.
+// `shapeFlowEntry` is exported for downstream tooling but the runner
+// keeps its FlowResult shape (legacy `{ flow, status: 'skipped' | 'ok' |
+// 'error', reason, details }`) — the new schema rolls forward in a
+// future refactor; for now this module imports the gate resolver only.
+import {
+  resolveScenarioGate,
+  type ScenarioName,
+  type BootstrapArtifact as GateBootstrapArtifact,
+} from './gate-resolver.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..', '..');
@@ -162,6 +175,10 @@ interface GateCheck {
   reason?: string;
 }
 
+// R-66 dual-maintained: scripts/lib/gate-resolver.ts mirrors this logic for
+// scenario-level gating; per-flow callers (runNexus, runLhDrain) keep using
+// these inline helpers for now. Dual-maintenance ends when R-66 fully
+// completes (Layer 11+) and per-flow gates also delegate to the lib.
 function checkR57(state: BootstrapState): GateCheck {
   const failed = (state.init_failed ?? []).some((f) => f.phase.includes('initialize_nexus'));
   const skipped = (state.init_skipped ?? []).some((p) => p.includes('initialize_nexus'));
@@ -188,17 +205,28 @@ function checkR20(state: BootstrapState): GateCheck {
 }
 
 function gateScenario(scenario: Scenario, state: BootstrapState): GateCheck {
-  switch (scenario) {
-    case 'nexus-only':
-      return checkR57(state);
-    case 'lh-drain':
-      return checkR20(state);
-    case 'full':
-      // 'full' degrades gracefully — runs only flows whose gate is clean.
-      return { ok: true };
-    default:
-      return { ok: true };
+  // R-66: delegate to the shared resolver lib for the scenarios it handles
+  // at top level. Legacy behavior (pre-R-66) was:
+  //   - nexus-only / lh-drain: gate-checked.
+  //   - everything else (full + scenario-N + ...): always { ok: true }.
+  // We preserve that default-pass shape — Layer 10 named scenarios run
+  // their own preconditions in their test files; the orchestrator must
+  // not pre-empt them.
+  if (scenario === 'nexus-only' || scenario === 'lh-drain') {
+    // BootstrapState is structurally compatible with BootstrapArtifact for
+    // every field the resolver reads (init_skipped, init_failed, pdas).
+    // The cast goes through `unknown` because BootstrapState lacks the
+    // generic `[key: string]: unknown` index signature that BootstrapArtifact
+    // declares — that signature exists so direct callers can stuff arbitrary
+    // fields into the artifact without churning the resolver's type.
+    const verdict = resolveScenarioGate(
+      scenario as ScenarioName,
+      state as unknown as GateBootstrapArtifact,
+    );
+    if (verdict.allowed) return { ok: true };
+    return { ok: false, reason: verdict.details ?? `gated:${verdict.reason ?? 'unknown'}` };
   }
+  return { ok: true };
 }
 
 // --------------------------------------------------------------------------
