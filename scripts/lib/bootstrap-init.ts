@@ -286,24 +286,34 @@ function saveArtifact(path: string, art: Artifact): void {
     secrets.deployer_keypair_path = art.deployer_keypair_path;
   }
 
-  // Mint keypair bytes — strip from public, mirror to secrets.
+  // SD-32 fix: build a public-side serialization that strips secrets WITHOUT
+  // mutating `art` in-memory. Prior to this fix, saveArtifact would
+  // delete `*_keypair_b64` from `art.mints` (and `art.ots`) after writing the
+  // public file. Subsequent phases that read `art.mints.rwt_mint_keypair_b64`
+  // (e.g. phaseRwtVault's warm-restart path) would see undefined and
+  // generate a fresh keypair, breaking the chain when verify-fresh-deploy.sh
+  // pre-genned a keypair via stage_pregen_keypairs and bootstrap-init was
+  // expected to reuse it.
+
+  // Mint keypair bytes — copy to secrets, strip from public-only view.
+  let publicMints: Artifact['mints'] | undefined = art.mints;
   if (art.mints) {
-    const mintsCopy = { ...art.mints };
+    publicMints = { ...art.mints };
     secrets.mints = {};
     for (const k of SECRET_MINT_KEYS) {
-      const v = (mintsCopy as Record<string, unknown>)[k];
+      const v = (publicMints as Record<string, unknown>)[k];
       if (typeof v === 'string' && v.length > 0) {
         secrets.mints[k] = v;
-        delete (mintsCopy as Record<string, unknown>)[k];
+        delete (publicMints as Record<string, unknown>)[k];
       }
     }
-    art.mints = mintsCopy as Artifact['mints'];
   }
 
-  // OT mint keypair bytes — strip from each public OT record, mirror to secrets.
+  // OT mint keypair bytes — same pattern.
+  let publicOts: Artifact['ots'] = art.ots;
   if (Array.isArray(art.ots)) {
     secrets.ots = {};
-    art.ots = art.ots.map((rec) => {
+    publicOts = art.ots.map((rec) => {
       const copy = { ...rec };
       for (const k of SECRET_OT_KEYS) {
         const v = (copy as Record<string, unknown>)[k];
@@ -325,7 +335,8 @@ function saveArtifact(path: string, art: Artifact): void {
     secrets.bots = art.bots;
   }
 
-  writeFileSync(path, JSON.stringify(art, null, 2) + '\n', 'utf8');
+  const publicArt = { ...art, mints: publicMints, ots: publicOts };
+  writeFileSync(path, JSON.stringify(publicArt, null, 2) + '\n', 'utf8');
   try {
     chmodSync(path, 0o600);
   } catch {

@@ -9,7 +9,8 @@
 #
 # Phase map:
 #   1. Deploy 5 contracts + record program IDs + cross-verify
-#  R20. Optional mint-pin migration (post-deploy, pre-state-init)
+#  R20. Optional 3-contract mint-pin migration + redeploy (post-deploy, pre-state-init)
+#       (yield-distribution full RWT+USDC; native-dex + ownership-token RWT-only)
 #   2. Initialize singletons (DEX/RWT/YD config)              [phaseE prefix]
 #   3. ARL OT bootstrap (init, Futarchy, YD distributor, mint) [bootstrap-init.ts]
 #   4. DEX pools (StandardCurve + concentrated) + initial LP  [bootstrap-init.ts]
@@ -17,6 +18,13 @@
 #   6. Register bot wallets                                   [bootstrap-init.ts]
 #   7. Authority transfers (deployer → Multisig → Futarchy)   [transfer-authority.ts]
 #   8. Fund + start 6 bots                                    [TODO Substep 4]
+#
+# When both RWT_MINT_PUBKEY and USDC_MINT_PUBKEY env vars are set, deploy.sh
+# runs the R20 migration AFTER Phase 1 and BEFORE Phase 2: rewrites the 3
+# contract source files (YD full; DEX + OT RWT-only), rebuilds the 3 .so
+# artifacts, and upgrades the on-chain programs at their existing IDs via
+# the BPF Loader v3 upgrade primitive. Subsequent state-init phases run
+# against the R20-pinned binaries.
 #
 # Optional env (forwarded to migrate-mints.sh):
 #   RWT_MINT_PUBKEY=<base58>     Real RWT mint pubkey
@@ -219,34 +227,83 @@ phase_8_start_bots() {
 }
 
 # ----------------------------------------------------------------------------
+# Re-deploy the 3 R20-pinned contracts to the running validator. After
+# migrate-mints.sh rewrites the source bytes and rebuilds the .so files,
+# the on-chain programs from Phase 1 still hold the placeholder build —
+# every YD/DEX/OT instruction would run against the wrong-mint bytes. This
+# function pushes the freshly built .so files to the existing program IDs.
+#
+# `solana program deploy --program-id <existing>` performs an upgrade in
+# place because the test-validator uses BPF Loader v3 (upgradeable). The
+# deployer keypair is still the upgrade authority — it was the deployer on
+# Phase 1, and Phase 7 (authority transfers) hasn't run yet at this point
+# in the deploy sequence (R20 is between Phase 1 and Phase 2 per main()).
+#
+# CRITICAL: this function MUST run before phase_7_authority_transfers.
+# After Phase 7 the deployer no longer holds upgrade authority and
+# `solana program deploy --program-id` will fail with a signature error.
+# ----------------------------------------------------------------------------
+redeploy_r20_contracts() {
+  local rpc="${SOLANA_URL:-http://127.0.0.1:8899}"
+  local deployer="$ROOT_DIR/deploy-keypair.json"
+  local vanity_dir="$ROOT_DIR/keys/vanity"
+
+  declare -A R20_REDEPLOY=(
+    [yield_distribution]="YLD9EBikcTmVCnVzdx6vuNajrDkp8tyCAgZrqTwmMXF"
+    [native_dex]="DEX8LmvJpjefPS1cGS9zWB9ybxN24vNjTTrusBeqyARL"
+    [ownership_token]="oWnqbNwmEdjNS5KVbxz8xeuGNjKMd1aiNF89d7qdARL"
+  )
+
+  for crate_snake in "${!R20_REDEPLOY[@]}"; do
+    local addr="${R20_REDEPLOY[$crate_snake]}"
+    local so="$ROOT_DIR/contracts/target/deploy/${crate_snake}.so"
+    local kp="$vanity_dir/$addr.json"
+
+    [[ -f "$so" ]] || { log "ERROR: missing artifact $so"; exit 1; }
+    [[ -f "$kp" ]] || { log "ERROR: missing vanity keypair $kp"; exit 1; }
+
+    log "redeploying $crate_snake -> $addr (R20 upgrade)"
+
+    # Sanity check: verify the program is on-chain and upgradeable.
+    local show_out
+    show_out="$(solana program show "$addr" --url "$rpc" 2>&1 || true)"
+    if ! echo "$show_out" | grep -q "Last Deployed"; then
+      log "ERROR: $crate_snake ($addr) not deployed on $rpc — Phase 1 must run before R20"
+      exit 1
+    fi
+    if echo "$show_out" | grep -qE 'Upgradeable:\s*false'; then
+      log "WARN: $crate_snake reports Upgradeable: false — solana program deploy may fail"
+    fi
+
+    solana program deploy \
+      --url "$rpc" \
+      --keypair "$deployer" \
+      --program-id "$kp" \
+      "$so" >>"$LOG_FILE" 2>&1 \
+      || { log "ERROR: redeploy failed for $crate_snake; see $LOG_FILE"; exit 1; }
+    log "  $crate_snake redeploy OK"
+  done
+}
+
+# ----------------------------------------------------------------------------
 # R20: optional mint-pin migration AFTER Phase 1 (devnet rehearsal step).
 #   Triggered when both RWT_MINT_PUBKEY and USDC_MINT_PUBKEY are set; the
-#   migrate-mints.sh script rebuilds yield-distribution WITHOUT the
-#   dev-placeholder-mints feature so the R20 tripwire fires on bad input.
+#   migrate-mints.sh script rewrites all 3 R20-pinned contracts (YD full
+#   RWT+USDC, DEX RWT-only, OT RWT-only) and rebuilds the .so files.
+#
+#   SD-32 closure: the previous halt-with-ALLOW_INCOMPLETE_R20-escape-hatch
+#   is gone now that redeploy_r20_contracts is wired (BPF Loader v3 upgrade
+#   in place via solana program deploy --program-id).
 # ----------------------------------------------------------------------------
 phase_r20_migrate() {
-  if [[ -n "${RWT_MINT_PUBKEY:-}" && -n "${USDC_MINT_PUBKEY:-}" ]]; then
-    log "=== R20: Migrate mints (real pubkeys provided) ==="
-    bash "$SCRIPT_DIR/migrate-mints.sh"
-    # After migrate-mints.sh the source tree carries the real bytes and
-    # the .so artifact has been rebuilt without `dev-placeholder-mints`.
-    # The on-chain program from Phase 1 is still the OLD placeholder
-    # build, so we MUST redeploy yield-distribution before continuing —
-    # otherwise downstream YD ix run against wrong-mint bytes. arlex-cli
-    # redeploy wiring is a Substep 1 closure item; until then this phase
-    # halts unless the operator opts in via ALLOW_INCOMPLETE_R20=1.
-    if [[ "${ALLOW_INCOMPLETE_R20:-0}" == "1" ]]; then
-      log "WARN: ALLOW_INCOMPLETE_R20=1 — skipping the redeploy halt; on-chain YD still has placeholder build"
-    else
-      log "ERROR: arlex-cli redeploy of yield-distribution is not yet wired."
-      log "       Source tree + .so artifact are R20-pinned, but on-chain YD is still the placeholder build."
-      log "       Run 'arlex-cli deploy contracts/yield-distribution' manually, then re-run with ALLOW_INCOMPLETE_R20=1,"
-      log "       or wait for Substep 1 closure to wire this path."
-      exit 2
-    fi
-  else
-    log "R20 migration skipped (RWT_MINT_PUBKEY / USDC_MINT_PUBKEY not set; using placeholder build)"
-  fi
+  # SD-32 follow-up: R20 logic is now invoked from e2e-bootstrap.sh::stage_r20_migrate
+  # (between stage_verify_ids and stage_bots) because phase_1_deploy's delegation
+  # to e2e-bootstrap.sh runs stage_init INSIDE phase_1_deploy — bootstrap-init.ts
+  # would halt on Phase F before control returned to deploy.sh::main(). Keeping
+  # phase_r20_migrate as a no-op marker preserves the phase-map comment block
+  # for readability; redeploy_r20_contracts() above is retained for direct
+  # operator invocation in mainnet runbooks where the phase split differs.
+  log "phase_r20_migrate: delegated to e2e-bootstrap.sh::stage_r20_migrate (SD-32)"
 }
 
 # ----------------------------------------------------------------------------

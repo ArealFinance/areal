@@ -473,6 +473,64 @@ stage_verify_ids() {
 }
 
 # ----------------------------------------------------------------------------
+# Stage 5.5 — SD-32 R20 mint-pin migration + 3-contract upgrade
+#
+# Triggered when RWT_MINT_PUBKEY + USDC_MINT_PUBKEY are set in env. Runs
+# AFTER deploy + verify-ids and BEFORE stage_bots / stage_init so the
+# bootstrap-init.ts pool-creation phase F sees R20-pinned bytes on-chain.
+#
+# Architecturally this used to live in scripts/deploy.sh::phase_r20_migrate
+# (between phase_1_deploy and phase_2_singletons), but phase_1_deploy's
+# delegation to e2e-bootstrap.sh runs stage_init INSIDE phase_1_deploy —
+# bootstrap-init.ts halts on Phase F before control returns to deploy.sh.
+# Inlining the R20 step here is the surgical fix.
+# ----------------------------------------------------------------------------
+
+stage_r20_migrate() {
+  if [[ -z "${RWT_MINT_PUBKEY:-}" || -z "${USDC_MINT_PUBKEY:-}" ]]; then
+    log "stage 5.5 R20: skipped (RWT_MINT_PUBKEY / USDC_MINT_PUBKEY not set)"
+    return 0
+  fi
+
+  stage_start "5.5/r20-migrate"
+
+  log "running scripts/migrate-mints.sh (3-contract scope: YD / DEX / OT)"
+  bash "$SCRIPT_DIR/migrate-mints.sh" 2>&1 | tee -a "$LOG_FILE" \
+    || die "migrate-mints.sh failed"
+
+  log "redeploying YD / DEX / OT with R20-pinned bytes"
+  local rpc="http://127.0.0.1:8899"
+  local deployer="$ROOT_DIR/deploy-keypair.json"
+  local vanity_dir="$ROOT_DIR/keys/vanity"
+
+  declare -A R20_REDEPLOY=(
+    [yield_distribution]="YLD9EBikcTmVCnVzdx6vuNajrDkp8tyCAgZrqTwmMXF"
+    [native_dex]="DEX8LmvJpjefPS1cGS9zWB9ybxN24vNjTTrusBeqyARL"
+    [ownership_token]="oWnqbNwmEdjNS5KVbxz8xeuGNjKMd1aiNF89d7qdARL"
+  )
+
+  for crate_snake in "${!R20_REDEPLOY[@]}"; do
+    local addr="${R20_REDEPLOY[$crate_snake]}"
+    local so="$ROOT_DIR/contracts/target/deploy/${crate_snake}.so"
+    local kp="$vanity_dir/$addr.json"
+
+    [[ -f "$so" ]] || die "missing artifact $so"
+    [[ -f "$kp" ]] || die "missing vanity keypair $kp"
+
+    log "  redeploying $crate_snake -> $addr (R20 upgrade)"
+    solana program deploy \
+      --url "$rpc" \
+      --keypair "$deployer" \
+      --program-id "$kp" \
+      "$so" >>"$LOG_FILE" 2>&1 \
+      || die "redeploy failed for $crate_snake; see $LOG_FILE"
+    log "    $crate_snake redeploy OK"
+  done
+
+  stage_end
+}
+
+# ----------------------------------------------------------------------------
 # Stage 6 — on-chain init driver (tsx)
 # ----------------------------------------------------------------------------
 
@@ -504,9 +562,31 @@ stage_init() {
     log "writing initial artifact: $ARTIFACT_FILE"
     write_initial_artifact
   else
-    # Even on warm restart, refresh deployer + RPC fields in case env changed.
-    log "refreshing artifact deployer + rpc fields"
-    write_initial_artifact
+    # SD-32 fix: previously this branch unconditionally called
+    # write_initial_artifact which OVERWROTE the entire file (bots block from
+    # stage_bots, mints from prior bootstrap-init.ts saveArtifact, etc.). The
+    # bug was masked because bootstrap-init.ts always recreated state in
+    # cold-run scenarios, but it broke phase-m bot registration whenever
+    # stage_bots had populated keypairs that bootstrap-init.ts then needed to
+    # consume. Replace the rewrite with a selective field refresh that
+    # preserves all other state.
+    log "refreshing artifact deployer + rpc fields (preserve bots/mints/pdas/init_*)"
+    local _dpk
+    _dpk="$(deployer_pubkey)"
+    python3 - "$ARTIFACT_FILE" "$BOOTSTRAP_TARGET" "$DEPLOYER_KP_FILE" "$_dpk" <<'PY'
+import json, sys
+path, bootstrap_target, deployer_kp, deployer_pk = sys.argv[1:5]
+with open(path) as f:
+    art = json.load(f)
+art['bootstrap_target'] = bootstrap_target
+art['rpc_url'] = 'http://127.0.0.1:8899'
+art['ws_url'] = 'ws://127.0.0.1:8900'
+art['deployer_keypair_path'] = deployer_kp
+art['deployer_pubkey'] = deployer_pk
+with open(path, 'w') as f:
+    json.dump(art, f, indent=2)
+    f.write('\n')
+PY
   fi
 
   log "running scripts/lib/bootstrap-init.ts (OT_TEST_COUNT=$OT_TEST_COUNT)"
@@ -765,6 +845,9 @@ main() {
   stage_build
   stage_deploy
   stage_verify_ids
+  # SD-32: R20 migration must run BEFORE stage_init so bootstrap-init.ts
+  # Phase F (pool creation) sees R20-pinned bytes on-chain.
+  stage_r20_migrate
   # Stage ordering invariant (Layer 10 substep 2 follow-up A-13):
   # stage_bots MUST run before stage_init. bootstrap-init.ts phaseRegisterBots
   # consumes art.bots[pool-rebalancer] and art.bots[rwt-manager]; if stage_init
