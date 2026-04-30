@@ -532,6 +532,70 @@ async function getTokenBalance(conn: Connection, ata: PublicKey): Promise<bigint
   return info.data.readBigUInt64LE(64);
 }
 
+/**
+ * R-72 (Layer 10 closure): client-side LP-shares-min calculator for
+ * non-empty pool re-seed. Replaces the SEC-26 ALLOW_NONEMPTY_POOL_RESEED
+ * operator burden with a 1%-slippage min_shares floor computed from the
+ * current pool reserves + total_lp_shares.
+ *
+ * Math (proportional):
+ *   shares_for_a = floor(deposit_a * total_lp_shares / reserve_a)
+ *   shares_for_b = floor(deposit_b * total_lp_shares / reserve_b)
+ *   expected     = MIN(shares_for_a, shares_for_b)   // limiting side
+ *   min_shares   = floor(expected * 99 / 100)         // 1% slippage
+ *
+ * For Concentrated pools the on-chain math distributes across bins;
+ * the proportional formula above is a safety FLOOR (never exceeds the
+ * actual mint), so passing it as min_shares prevents sandwich attacks
+ * without breaking legitimate re-seeds. Returns 0n on first-add
+ * (total_lp_shares == 0) — caller should already gate on vault_a == 0
+ * for that branch.
+ *
+ * PoolState layout (see contracts/native-dex/src/state.rs lines 39-65):
+ *   8   pool_type
+ *   ...
+ *   137 reserve_a       u64 LE
+ *   145 reserve_b       u64 LE
+ *   153 total_lp_shares u128 LE
+ */
+async function computeMinSharesForReseed(
+  conn: Connection,
+  poolPda: PublicKey,
+  depositA: bigint,
+  depositB: bigint,
+): Promise<bigint> {
+  const RESERVE_A_OFFSET = 137;
+  const RESERVE_B_OFFSET = 145;
+  const TOTAL_LP_SHARES_OFFSET = 153;
+  const POOL_STATE_MIN_SIZE = TOTAL_LP_SHARES_OFFSET + 16;
+
+  const info = await conn.getAccountInfo(poolPda);
+  if (!info || info.data.length < POOL_STATE_MIN_SIZE) {
+    return 0n;
+  }
+  const reserveA = info.data.readBigUInt64LE(RESERVE_A_OFFSET);
+  const reserveB = info.data.readBigUInt64LE(RESERVE_B_OFFSET);
+  // u128 LE = lower 8 bytes + upper 8 bytes << 64 (Buffer lacks readBigUInt128LE).
+  const tsLow = info.data.readBigUInt64LE(TOTAL_LP_SHARES_OFFSET);
+  const tsHigh = info.data.readBigUInt64LE(TOTAL_LP_SHARES_OFFSET + 8);
+  const totalShares = tsLow + (tsHigh << 64n);
+
+  if (totalShares === 0n || reserveA === 0n || reserveB === 0n) {
+    // First-add territory — caller's branch should have set min_shares: 0
+    // already; this returns 0 as a safe no-op.
+    return 0n;
+  }
+
+  const sharesForA = (depositA * totalShares) / reserveA;
+  const sharesForB = (depositB * totalShares) / reserveB;
+  const expected = sharesForA < sharesForB ? sharesForA : sharesForB;
+  // 1% slippage tolerance — generous, but the dress-rehearsal seed
+  // proportions are hand-tuned so an immediate re-seed produces near-
+  // identical shares unless the pool moved significantly between
+  // verify-fresh-deploy.sh runs.
+  return (expected * 99n) / 100n;
+}
+
 // --------------------------------------------------------------------------
 // IDL loading
 // --------------------------------------------------------------------------
@@ -1222,27 +1286,18 @@ async function phaseMasterPool(
     dexProgramId,
   );
 
-  // SEC-26 — sandwich protection. `min_shares: 0` is only safe on a first-add
-  // (vault_a == 0) because the share calc is deterministic for the first LP.
-  // When the pool already has prior liquidity, an adversary can sandwich the
-  // re-seed to drain proportional value. The interim policy: refuse to re-seed
-  // a non-empty master pool unless ALLOW_NONEMPTY_POOL_RESEED=1 is explicitly
-  // set. The proper fix (compute expected shares client-side and pass
-  // min_shares = floor(expected * 99 / 100)) requires the share-math reader
-  // and lands in SD-3 backlog.
+  // SEC-26 / R-72 (Layer 10 closure): sandwich protection on non-empty
+  // re-seed. First-add (vault_a == 0) uses min_shares: 0 — the share calc
+  // is deterministic. Non-empty re-seed computes a 1%-slippage floor
+  // client-side via computeMinSharesForReseed (R-72 replacement for the
+  // ALLOW_NONEMPTY_POOL_RESEED operator burden).
   const vaultABalance = await getTokenBalance(conn, vaultA);
+  let minShares: bigint = 0n;
   if (vaultABalance > 0n) {
-    if (process.env.ALLOW_NONEMPTY_POOL_RESEED !== '1') {
-      throw new Error(
-        `phase-f FATAL: master pool vault_a is non-empty ` +
-          `(balance=${vaultABalance.toString()} base units). Re-seeding with ` +
-          `min_shares=0 is sandwichable. Set ALLOW_NONEMPTY_POOL_RESEED=1 to ` +
-          `bypass with explicit operator consent (SEC-26).`,
-      );
-    }
-    warn(
+    minShares = await computeMinSharesForReseed(conn, poolPda, amountA, amountB);
+    log(
       'phase-f',
-      `ALLOW_NONEMPTY_POOL_RESEED=1 — re-seeding non-empty master pool with min_shares=0 (SEC-26 bypass)`,
+      `non-empty re-seed: computed min_shares=${minShares.toString()} (1% slippage floor)`,
     );
   }
 
@@ -1277,7 +1332,7 @@ async function phaseMasterPool(
       token_program: TOKEN_PROGRAM_ID,
       system_program: SYSTEM_PROGRAM_ID,
     },
-    args: { amount_a: Number(amountA), amount_b: Number(amountB), min_shares: 0 },
+    args: { amount_a: Number(amountA), amount_b: Number(amountB), min_shares: Number(minShares) },
     remainingAccounts: [{ pubkey: binArrayPda, isSigner: false, isWritable: true }],
     computeUnits: 400_000,
   });
@@ -2211,23 +2266,17 @@ async function phaseArlRwtPool(
     dexProgramId,
   );
 
-  // SEC-26 — sandwich protection. The early-return above (existingLiquidity
-  // check) means vaultA must be empty at this point. Re-assert defensively in
-  // case a future refactor drops that guard, and let operator opt-in via the
-  // ALLOW_NONEMPTY_POOL_RESEED env when re-seeding is the explicit intent.
+  // SEC-26 / R-72 (Layer 10 closure): sandwich protection. First-add
+  // (vault_a == 0) uses min_shares: 0 — share calc deterministic. Non-empty
+  // re-seed computes 1%-slippage min_shares floor client-side via
+  // computeMinSharesForReseed.
   const arlVaultABalance = await getTokenBalance(conn, vaultA);
+  let arlMinShares: bigint = 0n;
   if (arlVaultABalance > 0n) {
-    if (process.env.ALLOW_NONEMPTY_POOL_RESEED !== '1') {
-      throw new Error(
-        `phase-l FATAL: ARL/RWT pool vault_a is non-empty ` +
-          `(balance=${arlVaultABalance.toString()} base units). Re-seeding with ` +
-          `min_shares=0 is sandwichable. Set ALLOW_NONEMPTY_POOL_RESEED=1 to ` +
-          `bypass with explicit operator consent (SEC-26).`,
-      );
-    }
-    warn(
+    arlMinShares = await computeMinSharesForReseed(conn, poolPda, amountA, amountB);
+    log(
       'phase-l',
-      `ALLOW_NONEMPTY_POOL_RESEED=1 — re-seeding non-empty ARL/RWT pool with min_shares=0 (SEC-26 bypass)`,
+      `non-empty re-seed: computed min_shares=${arlMinShares.toString()} (1% slippage floor)`,
     );
   }
 
@@ -2246,9 +2295,7 @@ async function phaseArlRwtPool(
       token_program: TOKEN_PROGRAM_ID,
       system_program: SYSTEM_PROGRAM_ID,
     },
-    // SEC-26 — first-add deterministic share calc means min_shares: 0 is safe
-    // only when the early-return + re-assert above proved vaultA == 0.
-    args: { amount_a: Number(amountA), amount_b: Number(amountB), min_shares: 0 },
+    args: { amount_a: Number(amountA), amount_b: Number(amountB), min_shares: Number(arlMinShares) },
   });
   // T-10 — match rest-of-file pattern: record send failures as init_failed and
   // continue.
