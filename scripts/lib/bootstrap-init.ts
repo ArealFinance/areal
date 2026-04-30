@@ -1654,6 +1654,22 @@ async function phaseUsdcSupply(
       log('phase-h', `OT(${ot.ot_mint}) revenue ATA seeded to $${(REVENUE_SEED_AMOUNT / 1_000_000n).toString()}`);
     }
   }
+
+  // Accumulator RWT ATA per OT — create empty ATA owned by the accumulator
+  // PDA so convert_to_rwt's `accumulator_rwt_ata` constraint resolves
+  // (handler reads its owner field and reverts with "wrong owner" if the
+  // ATA doesn't yet exist as an SPL Token account). Convert-and-fund-crank
+  // swaps USDC → RWT into this ATA, then drains to fee_account + reward_vault.
+  if (art.mints?.rwt_mint) {
+    const rwtMint = new PublicKey(art.mints.rwt_mint);
+    for (const ot of art.ots ?? []) {
+      if (!ot.yd_accumulator_pda) continue;
+      const accumulator = new PublicKey(ot.yd_accumulator_pda);
+      const rwtAta = await ensureAta(conn, deployer, rwtMint, accumulator);
+      ot.accumulator_rwt_ata = rwtAta.toBase58();
+      log('phase-h', `OT(${ot.ot_mint}) accumulator RWT ATA ${rwtAta.toBase58()}`);
+    }
+  }
 }
 
 // ===========================================================================
