@@ -738,31 +738,9 @@ async function phaseSingletons(
     log('phase-b', `DEX::initialize_dex OK (config=${dexConfigPda.toBase58()})`);
   }
 
-  // --- YD initialize_config ---
-  const ydConfigInfo = await conn.getAccountInfo(ydDistConfigPda);
-  if (ydConfigInfo) {
-    log('phase-b', 'YD::initialize_config skip (already initialized)');
-  } else if (!ixExists(ydIdl, 'initialize_config')) {
-    warn('phase-b', 'YD IDL missing initialize_config; skipping');
-    skipped.push('YD::initialize_config');
-  } else {
-    const ydClient = new ArlexClient(loadIdlForClient('yield-distribution'), ydProgramId, conn);
-    const tx = ydClient.buildTransaction('initialize_config', {
-      accounts: {
-        deployer: deployer.publicKey,
-        config: ydDistConfigPda,
-        areal_fee_destination_account: arealFeeAta,
-        system_program: SYSTEM_PROGRAM_ID,
-      },
-      args: {
-        publish_authority: Array.from(deployer.publicKey.toBytes()),
-        protocol_fee_bps: 25,
-        min_distribution_amount: 1_000_000,
-      },
-    });
-    await sendAndConfirm(conn, tx, [deployer]);
-    log('phase-b', `YD::initialize_config OK (config=${ydDistConfigPda.toBase58()})`);
-  }
+  // YD initialize_config moved to phaseYdConfig (runs AFTER phaseRwtVault).
+  // YD's areal_fee_destination_account MUST be RWT-denominated per Layer 7
+  // design (immutable after init); RWT mint doesn't exist yet at this phase.
 
   art.pdas = {
     ...(art.pdas ?? {} as NonNullable<Artifact['pdas']>),
@@ -865,6 +843,64 @@ async function phaseRwtVault(
     rwt_mint: rwtMintKp.publicKey.toBase58(),
     rwt_mint_keypair_b64: keypairToB64(rwtMintKp),
   };
+}
+
+async function phaseYdConfig(
+  conn: Connection,
+  deployer: Keypair,
+  art: Artifact,
+): Promise<void> {
+  log('phase-c2', 'initializing YD config (deferred — needs RWT mint for fee_destination)');
+
+  const ydProgramId = new PublicKey(art.programs.yield_distribution);
+  const ydIdl = loadIdl('yield-distribution');
+  const skipped: string[] = art.init_skipped ?? [];
+
+  if (!art.mints?.rwt_mint) {
+    warn('phase-c2', 'rwt_mint not set; cannot init YD config');
+    skipped.push('YD::initialize_config (no rwt_mint)');
+    art.init_skipped = skipped;
+    return;
+  }
+  const rwtMint = new PublicKey(art.mints.rwt_mint);
+  const [ydDistConfigPda] = findPda([Buffer.from('dist_config')], ydProgramId);
+
+  const ydConfigInfo = await conn.getAccountInfo(ydDistConfigPda);
+  if (ydConfigInfo) {
+    log('phase-c2', 'YD::initialize_config skip (already initialized)');
+    return;
+  }
+  if (!ixExists(ydIdl, 'initialize_config')) {
+    warn('phase-c2', 'YD IDL missing initialize_config; skipping');
+    skipped.push('YD::initialize_config');
+    art.init_skipped = skipped;
+    return;
+  }
+
+  // Per Layer 7 design (and convert_to_rwt fee_account constraint), the YD
+  // areal_fee_destination_account MUST be RWT-denominated and the value is
+  // immutable after init. Create deployer's RWT ATA — it will later be
+  // rotated to a multisig-owned ATA in mainnet bootstrap (out of scope).
+  const rwtArealFeeAta = await ensureAta(conn, deployer, rwtMint, deployer.publicKey);
+  log('phase-c2', `yd_areal_fee_ata (RWT)=${rwtArealFeeAta.toBase58()}`);
+
+  const ydClient = new ArlexClient(loadIdlForClient('yield-distribution'), ydProgramId, conn);
+  const tx = ydClient.buildTransaction('initialize_config', {
+    accounts: {
+      deployer: deployer.publicKey,
+      config: ydDistConfigPda,
+      areal_fee_destination_account: rwtArealFeeAta,
+      system_program: SYSTEM_PROGRAM_ID,
+    },
+    args: {
+      publish_authority: Array.from(deployer.publicKey.toBytes()),
+      protocol_fee_bps: 25,
+      min_distribution_amount: 1_000_000,
+    },
+  });
+  await sendAndConfirm(conn, tx, [deployer]);
+  log('phase-c2', `YD::initialize_config OK (config=${ydDistConfigPda.toBase58()})`);
+  art.init_skipped = skipped;
 }
 
 async function phaseLiquidityHolding(
@@ -2741,6 +2777,9 @@ async function main(): Promise<void> {
   saveArtifact(argv.artifact, art);
 
   await phaseRwtVault(conn, deployer, art);
+  saveArtifact(argv.artifact, art);
+
+  await phaseYdConfig(conn, deployer, art);
   saveArtifact(argv.artifact, art);
 
   await phaseLiquidityHolding(conn, deployer, art);

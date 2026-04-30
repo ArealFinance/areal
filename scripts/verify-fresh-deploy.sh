@@ -231,8 +231,8 @@ run_scenarios_inline() {
   # stages: revenue → distribute → convert → publish. Wait long enough for
   # all 4 to fire at least twice so distributor.total_funded > 0 and the
   # publisher root is non-zero by the time scenario-1 reads on-chain state.
-  log "step 8 prelude: waiting 60s for crank pipeline (revenue → distribute → convert → publish)"
-  sleep 60
+  log "step 8 prelude: waiting 90s for crank pipeline (revenue → distribute → convert → publish)"
+  sleep 90
   log "step 8: running 6 Layer 10 scenarios individually with SCENARIO_*_INLINE_EXEC=1"
   local tsx_bin="$ROOT_DIR/bots/node_modules/.bin/tsx"
   if [[ ! -x "$tsx_bin" ]]; then
