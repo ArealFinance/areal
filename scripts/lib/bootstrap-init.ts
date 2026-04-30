@@ -1454,6 +1454,12 @@ async function phaseOts(conn: Connection, deployer: Keypair, art: Artifact, coun
     const existingRec = existing[i];
     if (existingRec?.ot_mint_keypair_b64) {
       otKp = keypairFromB64(existingRec.ot_mint_keypair_b64);
+    } else if (i === ARL_OT_INDEX && art.mints?.arl_ot_mint_keypair_b64) {
+      // Reuse the ARL OT mint keypair created in phase-a so `ots[ARL_OT_INDEX].
+      // ot_mint === mints.arl_ot_mint`. Without this, scenario tests that
+      // resolve the ARL OT record via `ots.find(o => o.ot_mint === arl_ot_mint)`
+      // fail at lookup time (S1.2 + S1.9 — see layer-10-scenario-1-happy-path).
+      otKp = keypairFromB64(art.mints.arl_ot_mint_keypair_b64);
     } else {
       otKp = Keypair.generate();
     }
@@ -1625,6 +1631,27 @@ async function phaseUsdcSupply(
     if (bal < 100_000_000n) {
       await mintTo(conn, deployer, usdcMint, accAta, 100_000_000n - bal);
       log('phase-h', `OT(${ot.ot_mint}) accumulator topped up to 100 USDC`);
+    }
+  }
+
+  // Revenue token account per OT — mint $500 USDC each so revenue-crank's
+  // distribute_revenue has a non-trivial input on first tick. Per
+  // layer-10-scenario-1 step 1 ("send $500 USDC → Revenue ATA → seed").
+  // Without this seed, distributor.total_funded stays at 0 and S1.3b /
+  // S1.9 fail.
+  const REVENUE_SEED_AMOUNT = 500_000_000n; // $500 with 6 decimals.
+  for (const ot of art.ots ?? []) {
+    if (!ot.revenue_token_account) continue;
+    const revAta = new PublicKey(ot.revenue_token_account);
+    const revInfo = await conn.getAccountInfo(revAta);
+    if (!revInfo) {
+      log('phase-h', `revenue token account ${revAta.toBase58()} not yet present, skipping seed`);
+      continue;
+    }
+    const bal = await getTokenBalance(conn, revAta);
+    if (bal < REVENUE_SEED_AMOUNT) {
+      await mintTo(conn, deployer, usdcMint, revAta, REVENUE_SEED_AMOUNT - bal);
+      log('phase-h', `OT(${ot.ot_mint}) revenue ATA seeded to $${(REVENUE_SEED_AMOUNT / 1_000_000n).toString()}`);
     }
   }
 }
