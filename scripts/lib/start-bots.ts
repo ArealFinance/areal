@@ -67,7 +67,12 @@ import {
   SystemProgram,
   Transaction,
 } from '@solana/web3.js';
-import { assertAuthorityChainComplete } from './zero-authority-audit.js';
+// SD-31: zero-authority-audit canonical home is bots/shared/. Direct
+// relative import to the compiled ESM artefact resolves identically
+// for tsx-from-scripts/lib (here) and tsx-from-bots/.e2e (test files);
+// avoids the package-exports / NODE_PATH / symlink edge cases that
+// surface when tsx invokes scripts/ from a non-bots cwd.
+import { assertAuthorityChainComplete } from '../../bots/shared/dist/zero-authority-audit.js';
 
 // --------------------------------------------------------------------------
 // Paths + constants

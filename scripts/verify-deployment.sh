@@ -199,35 +199,24 @@ run_audit_lib() {
   if [[ ! -x "$tsx_bin" ]]; then
     tsx_bin="tsx"
   fi
-  # Inline driver — the helper is library-only, so we compose a one-shot
-  # invocation inside `node`-via-tsx without polluting scripts/lib/.
-  # SEC-79 / A-1: the heredoc body imports `./scripts/lib/...` and reads
-  # `./data/...` via paths relative to the *shell cwd*. Force cwd to
-  # $ROOT_DIR so this script is safe to invoke from any directory.
-  # SD-36 / SEC-79 followup: ESM module resolution doesn't honor NODE_PATH the
-  # way CJS does, so cd into bots/ where node_modules is the closest match.
-  # The heredoc body uses absolute paths for the scripts/lib import +
-  # artifact reads via $ARTIFACT (already absolute).
-  # SD-36 / SEC-79: write heredoc to a temp .mts file inside bots/ where ESM
-  # module resolution can find @solana/web3.js + run tsx on the file. stdin
-  # heredocs default to CJS where top-level await isn't supported.
-  # SD-36 / SEC-79: write the driver as .cts (CommonJS TypeScript) so it
-  # interops cleanly with scripts/lib/*.ts which load as CJS (no
-  # "type": "module" in scripts/lib or root package.json). ESM (.mts) consumer
-  # of CJS module triggers named-import errors because Node treats the
-  # `module.exports` as a single default — .cts on both sides avoids that.
-  local audit_tmp="$ROOT_DIR/bots/.audit-lib-driver.cts"
-  cat >"$audit_tmp" <<TS
+  # SD-31 (Layer 10 closure): zero-authority-audit lives in
+  # @areal/bots-shared as a proper ESM module. The earlier .cts workaround
+  # driver is gone — single-line `import` against the package path resolves
+  # cleanly when tsx runs from inside bots/ (closest node_modules root).
+  local audit_tmp="$ROOT_DIR/bots/.audit-lib-driver.mts"
+  cat >"$audit_tmp" <<'TS'
 import { readFileSync, existsSync } from 'node:fs';
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
-import { assertAuthorityChainComplete, assertDeployerHasNoAuthority } from '$ROOT_DIR/scripts/lib/zero-authority-audit.ts';
+import {
+  assertAuthorityChainComplete,
+  assertDeployerHasNoAuthority,
+} from './shared/dist/zero-authority-audit.js';
 
 const mode = process.env.AUDIT_MODE ?? 'positive';
-const artPath = process.env.ARTIFACT ?? '$ROOT_DIR/data/e2e-bootstrap.json';
+const artPath = process.env.ARTIFACT!;
 const art = JSON.parse(readFileSync(artPath, 'utf8'));
 
-// Sec M-2: deployer_keypair_path lives in <artifact>.secrets.json (SEC-44),
-// merge it before instantiating the deployer Keypair.
+// Sec M-2: deployer_keypair_path lives in <artifact>.secrets.json (SEC-44).
 const secretsPath = artPath.replace(/\.json$/, '.secrets.json');
 if (existsSync(secretsPath)) {
   const secrets = JSON.parse(readFileSync(secretsPath, 'utf8'));
@@ -241,25 +230,16 @@ const deployer = Keypair.fromSecretKey(
   Uint8Array.from(JSON.parse(readFileSync(art.deployer_keypair_path, 'utf8'))),
 );
 
-let multisig: PublicKey;
 const msB58 = art.multisig_pubkey ?? art.multisig?.pubkey ?? null;
-multisig = msB58 ? new PublicKey(msB58) : deployer.publicKey;
+const multisig: PublicKey = msB58 ? new PublicKey(msB58) : deployer.publicKey;
 
-(async () => {
-  let result;
-  if (mode === 'positive') {
-    result = await assertAuthorityChainComplete(conn, { multisigPubkey: multisig }, art);
-  } else {
-    result = await assertDeployerHasNoAuthority(conn, deployer.publicKey, art);
-  }
-  process.stdout.write(JSON.stringify(result));
-  process.exit(result.ok ? 0 : 3);
-})().catch((e) => {
-  process.stderr.write(\`audit-lib error: \${e instanceof Error ? e.message : String(e)}\n\`);
-  process.exit(2);
-});
+const result = mode === 'positive'
+  ? await assertAuthorityChainComplete(conn, { multisigPubkey: multisig }, art)
+  : await assertDeployerHasNoAuthority(conn, deployer.publicKey, art);
+process.stdout.write(JSON.stringify(result));
+process.exit(result.ok ? 0 : 3);
 TS
-  ( cd "$ROOT_DIR/bots" && NODE_PATH="$ROOT_DIR/bots/node_modules" "$tsx_bin" "$audit_tmp" )
+  ( cd "$ROOT_DIR/bots" && "$tsx_bin" "$audit_tmp" )
   local rc=$?
   rm -f "$audit_tmp"
   return $rc

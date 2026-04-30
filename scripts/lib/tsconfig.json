@@ -15,7 +15,9 @@
     "typeRoots": ["../../bots/node_modules/@types"],
     "baseUrl": "../..",
     "paths": {
-      "@solana/web3.js": ["bots/node_modules/@solana/web3.js"]
+      "@solana/web3.js": ["bots/node_modules/@solana/web3.js"],
+      "@areal/bots-shared/*": ["bots/shared/src/*"],
+      "@areal/bots-shared": ["bots/shared/src/index"]
     }
   },
   "include": ["./*.ts"],

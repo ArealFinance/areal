@@ -72,12 +72,13 @@ import {
 // @ts-ignore — local ESM with .d.mts sibling, resolves at runtime via tsx.
 import { ArlexClient } from '../../dashboard/src/lib/arlex-client/index.mjs';
 
+// SD-31: shared single-source-of-truth import via bots/shared/ relative path.
 import {
   assertAuthorityChainComplete,
   assertDeployerHasNoAuthority,
   assertDeployerZeroAuthority,
   type ZeroAuthorityArtifact,
-} from './zero-authority-audit.js';
+} from '../../bots/shared/dist/zero-authority-audit.js';
 
 // --------------------------------------------------------------------------
 // Paths + constants
