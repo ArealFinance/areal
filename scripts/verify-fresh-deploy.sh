@@ -15,6 +15,8 @@
 #   4. Run scripts/deploy.sh (Phases 1-8 — full chain).
 #   5. Run scripts/lib/e2e-runner.ts --scenario all (Master E2E).
 #   6. Run scripts/verify-deployment.sh (cross-contract audit).
+#   7. Run scripts/cu-profile.sh (R24 live CU profile + R46 stack-overflow
+#      grep). Best-effort: skipped on missing CRANK_KEYPAIR / programs.
 #
 # Exit code carries from the first failing step. Tee-logs to
 # data/layer-10-fresh-deploy.log.
@@ -203,6 +205,19 @@ run_audit() {
   bash "$SCRIPT_DIR/verify-deployment.sh"
 }
 
+run_cu_profile() {
+  log "step 7: running scripts/cu-profile.sh (R24 live CU + R46 grep)"
+  # cu-profile.sh sources data/e2e-bootstrap.env for RPC + program IDs +
+  # CRANK_KEYPAIR + E2E_BOOTSTRAP_DONE; that file is written by phase 1 of
+  # bootstrap-init.ts (run via deploy.sh).
+  if [[ ! -f "$DATA_DIR/e2e-bootstrap.env" ]]; then
+    log "step 7: skipped — data/e2e-bootstrap.env not found"
+    return 0
+  fi
+  # Source in subshell so envs leak to cu-profile.sh only.
+  ( set -a; source "$DATA_DIR/e2e-bootstrap.env"; set +a; bash "$SCRIPT_DIR/cu-profile.sh" )
+}
+
 main() {
   log "Layer 10 fresh-deploy starting (keep-ledger=$KEEP_LEDGER)"
   cleanup_validator
@@ -212,7 +227,8 @@ main() {
   run_deploy
   run_e2e
   run_audit
-  log "Layer 10 fresh-deploy complete — all 6 steps green"
+  run_cu_profile
+  log "Layer 10 fresh-deploy complete — all 7 steps green"
 }
 
 main

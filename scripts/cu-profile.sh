@@ -65,7 +65,11 @@ ITERATIONS="${CU_PROFILE_ITERATIONS:-5}"
 OUTPUT_DIR="${CU_PROFILE_OUTPUT_DIR:-$ROOT_DIR/data}"
 
 cd "$ROOT_DIR"
-exec npx --prefix bots tsx scripts/lib/cu-profile.ts \
+TSX_BIN="$ROOT_DIR/bots/node_modules/.bin/tsx"
+if [[ ! -x "$TSX_BIN" ]]; then
+  TSX_BIN="tsx"
+fi
+exec env NODE_PATH="$ROOT_DIR/bots/node_modules" "$TSX_BIN" scripts/lib/cu-profile.ts \
   --artifact "$ARTIFACT" \
   --iterations "$ITERATIONS" \
   --output-dir "$OUTPUT_DIR"

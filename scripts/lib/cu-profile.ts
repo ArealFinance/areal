@@ -130,11 +130,31 @@ interface BootstrapState {
   init_failed?: { phase: string; error: string }[];
 }
 
+function secretsPathFor(artifactPath: string): string {
+  // /a/b/c.json → /a/b/c.secrets.json (matches transfer-authority.ts pattern,
+  // Sec M-2 — secrets split into a sibling file off the public artifact).
+  const lastDot = artifactPath.lastIndexOf('.');
+  const base = lastDot > 0 ? artifactPath.slice(0, lastDot) : artifactPath;
+  const ext = lastDot > 0 ? artifactPath.slice(lastDot) : '.json';
+  return `${base}.secrets${ext}`;
+}
+
 function loadBootstrap(path: string): BootstrapState {
   if (!existsSync(path)) {
     throw new Error(`bootstrap artifact missing at ${path} — run scripts/e2e-bootstrap.sh first`);
   }
-  return JSON.parse(readFileSync(path, 'utf8')) as BootstrapState;
+  const merged = JSON.parse(readFileSync(path, 'utf8')) as BootstrapState;
+  // Sec M-2 — re-merge the secrets sibling so we get deployer_keypair_path.
+  const secretsPath = secretsPathFor(path);
+  if (existsSync(secretsPath)) {
+    const secrets = JSON.parse(readFileSync(secretsPath, 'utf8')) as {
+      deployer_keypair_path?: string;
+    };
+    if (secrets.deployer_keypair_path && !merged.deployer_keypair_path) {
+      merged.deployer_keypair_path = secrets.deployer_keypair_path;
+    }
+  }
+  return merged;
 }
 
 function loadKeypair(path: string): Keypair {
@@ -661,14 +681,15 @@ function renderMarkdownTable(layer: 8 | 9, results: IxResult[]): string {
   const filtered = results.filter((r) => r.layer === layer);
   if (filtered.length === 0) return '_(no instructions in this layer)_\n';
   const rows = filtered.map((r) => {
+    const kind = r.synthetic_skeleton ? 'skeleton' : 'live';
     if (r.status === 'ok') {
-      return `| \`${r.name}\` | ${r.samples} | ${r.p50} | ${r.p95} | ${r.max} | ${r.stackOverflowCount > 0 ? 'OVERFLOW' : 'clean'} |`;
+      return `| \`${r.name}\` | ${kind} | ${r.samples} | ${r.p50} | ${r.p95} | ${r.max} | ${r.stackOverflowCount > 0 ? 'OVERFLOW' : 'clean'} |`;
     }
-    return `| \`${r.name}\` | ${r.status} | — | — | — | ${r.reason ?? ''} |`;
+    return `| \`${r.name}\` | ${kind} | ${r.status} | — | — | — | ${r.reason ?? ''} |`;
   });
   return [
-    '| Instruction | Samples | P50 CU | P95 CU | Max CU | R46 |',
-    '|---|---|---|---|---|---|',
+    '| Instruction | Kind | Samples | P50 CU | P95 CU | Max CU | R46 |',
+    '|---|---|---|---|---|---|---|',
     ...rows,
     '',
   ].join('\n');
@@ -686,6 +707,29 @@ function renderMarkdownReport(report: ProfileReport): string {
   }
   if (report.init_failed.length > 0) {
     lines.push(`- Bootstrap failed phases: ${report.init_failed.length} (gated ix will skip)`);
+  }
+  // R-63 banner: explain skeleton vs live so readers don't confuse early-exit
+  // CU readings (skeleton) with success-path CU usage. Static estimates above
+  // remain canonical until the harness flips registry entries to live.
+  const anySkeleton = report.results.some((r) => r.synthetic_skeleton);
+  const anyLive = report.results.some((r) => !r.synthetic_skeleton);
+  if (anySkeleton && !anyLive) {
+    lines.push('');
+    lines.push(
+      '> **Kind=skeleton:** every entry is a discriminator-only synthetic ' +
+        'instruction (handler reverts at account validation). The CU readings ' +
+        'measure dispatch + early-exit cost, not success-path execution. R46 ' +
+        'stack-overflow grep is still meaningful (stack frame is established ' +
+        'as part of dispatch). For acceptance gates against D5 thresholds, ' +
+        'use the static estimates above until registry entries flip to live.',
+    );
+  } else if (anySkeleton && anyLive) {
+    lines.push('');
+    lines.push(
+      '> **Kind:** rows marked `skeleton` are early-exit synthetic ' +
+        'instructions; rows marked `live` exercise the success path. Compare ' +
+        'live numbers against D5 thresholds.',
+    );
   }
   lines.push('');
   lines.push('### Layer 8');
