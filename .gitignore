@@ -33,7 +33,7 @@ blockchain.zip
 
 # === Claude local config (per-machine) ===
 CLAUDE.local.md
-.claude/settings.local.json
+.claude/
 
 # === Rust ===
 *.so
