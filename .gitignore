@@ -35,6 +35,9 @@ blockchain.zip
 CLAUDE.local.md
 .claude/
 
+# === Planning documents (per-machine working drafts) ===
+plan/
+
 # === Rust ===
 *.so
 *.dylib
