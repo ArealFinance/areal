@@ -13,3 +13,6 @@
 [submodule "app"]
 	path = app
 	url = https://github.com/ArealFinance/app.git
+[submodule "sdk"]
+	path = sdk
+	url = https://github.com/ArealFinance/sdk.git
