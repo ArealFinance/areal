@@ -263,17 +263,23 @@ copy_tree "grafana/dashboards" "*.json"
 # ---------- Validate rendered output ----------
 log "validating rendered configs"
 
+# NOTE: prom/prometheus and prom/alertmanager images use the main daemon as
+# their ENTRYPOINT, so we must override with --entrypoint to invoke the
+# bundled promtool / amtool CLIs instead.
+
 if [[ -f "${RENDERED_DIR}/prometheus/prometheus.yml" ]]; then
-  docker run --rm -v "${RENDERED_DIR}/prometheus:/cfg:ro" \
+  docker run --rm --entrypoint /bin/promtool \
+    -v "${RENDERED_DIR}/prometheus:/cfg:ro" \
     prom/prometheus:v2.55.1 \
-    promtool check config /cfg/prometheus.yml \
+    check config /cfg/prometheus.yml \
     || die "promtool check config failed" 6
 fi
 
 if [[ -f "${RENDERED_DIR}/prometheus/rules/infra.yml" ]]; then
-  docker run --rm -v "${RENDERED_DIR}/prometheus:/cfg:ro" \
+  docker run --rm --entrypoint /bin/promtool \
+    -v "${RENDERED_DIR}/prometheus:/cfg:ro" \
     prom/prometheus:v2.55.1 \
-    promtool check rules /cfg/rules/infra.yml \
+    check rules /cfg/rules/infra.yml \
     || die "promtool check rules failed" 6
 fi
 
@@ -281,9 +287,10 @@ docker compose -f "${RENDERED_DIR}/docker-compose.yml" config -q \
   || die "docker compose config -q failed" 6
 
 if [[ -f "${RENDERED_DIR}/alertmanager/alertmanager.yml" ]]; then
-  docker run --rm -v "${RENDERED_DIR}/alertmanager:/cfg:ro" \
+  docker run --rm --entrypoint /bin/amtool \
+    -v "${RENDERED_DIR}/alertmanager:/cfg:ro" \
     prom/alertmanager:v0.27.0 \
-    amtool check-config /cfg/alertmanager.yml \
+    check-config /cfg/alertmanager.yml \
     || die "amtool check-config failed" 6
 fi
 
@@ -355,6 +362,27 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     | head -1 >/dev/null \
     || die "blackbox-exporter probe failed" 7
   log "  blackbox-exporter probe ok"
+
+  # End-to-end query: prometheus must report `up==1` for prometheus + node
+  # jobs (proves the in-container scrape connectivity actually works, not
+  # just that each /metrics endpoint individually responds on host loopback).
+  # Wait up to 30s for the first scrape cycle to land.
+  log "  verifying prometheus scrape connectivity (up == 1 for prometheus + node)"
+  e2e_ready=0
+  for _ in $(seq 1 30); do
+    resp=$(curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up' 2>/dev/null || true)
+    if printf '%s' "${resp}" | grep -q '"job":"prometheus"' \
+       && printf '%s' "${resp}" | grep -q '"job":"node"' \
+       && printf '%s' "${resp}" | grep -qv '"value":\[[0-9.]*,"0"\]'; then
+      e2e_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ ${e2e_ready} -eq 0 ]]; then
+    die "prometheus scrape connectivity check failed (up != 1 for prometheus or node after 30s)" 7
+  fi
+  log "  prometheus + node scrape: up == 1"
 fi
 
 # ---------- Listen audit ----------
