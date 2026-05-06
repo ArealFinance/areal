@@ -140,15 +140,15 @@ This is part of the project's commitment to ops transparency, particularly durin
 | 9100 | node_exporter | 20 |
 | 9115 | blackbox_exporter | 20 |
 | 3000 | Grafana (publicly via cloudflared) | 20 |
-| 9101..9106 | 6 bot cranks (merkle-publisher, revenue-crank, convert-and-fund-crank, yield-claim-crank, pool-rebalancer, nexus-manager) | 21 |
+| 9101..9106 | 6 bot cranks (merkle-publisher, revenue-crank, pool-rebalancer, convert-and-fund-crank, yield-claim-crank, nexus-manager) | 21 |
 | 9201 | chain-invariants exporter | 22 |
 
 ### Repository layout
 
 - **Configuration templates** — `bots/observability/` (in the `bots/` submodule):
   - `docker-compose.template.yml`, `prometheus.template.yml`, `alertmanager.template.yml`, `grafana.template.ini`
-  - Provisioning: `grafana/provisioning/{datasources.template.yml,dashboards.yml}`
-  - Dashboards: `grafana/dashboards/infra.json` (Phase 20 ships only Infra; Phase 21+ adds Areal — Protocol Health, Bot Deep Dive, Chain Invariants)
+  - Provisioning: `grafana/provisioning/datasources/datasources.template.yml`, `grafana/provisioning/dashboards/dashboards.yml`
+  - Dashboards: `grafana/dashboards/infra.json` — mounted to `/etc/grafana/dashboard-files/` in container, separate from provisioning provider YAMLs (Phase 20 ships only Infra; Phase 21+ adds Areal — Protocol Health, Bot Deep Dive, Chain Invariants)
   - Alert rules: `prometheus/rules/infra.yml` (Phase 20: 4 base alerts; Phase 21+ adds bot-specific and chain-invariant rules)
   - `.env.example` — template (all values empty by convention)
   - `README.md` — operator quickstart for `bots/observability/`

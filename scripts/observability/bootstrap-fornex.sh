@@ -216,12 +216,9 @@ log "rendering templates from ${SOURCE_DIR} -> ${RENDERED_DIR}"
 mkdir -p "${RENDERED_DIR}"
 
 # Whitelist of vars exposed to envsubst (avoid leaking unrelated env).
+# Phase 20 ships Telegram-only routing; SMTP / Slack vars deferred.
 ENVSUBST_VARS=""
 for var in "${REQUIRED_VARS[@]}"; do
-  ENVSUBST_VARS+=" \${${var}}"
-done
-# Optional vars -- pass through whether set or not.
-for var in SMTP_HOST SMTP_PORT SMTP_FROM SMTP_USER SMTP_PASSWORD SLACK_WEBHOOK_URL; do
   ENVSUBST_VARS+=" \${${var}}"
 done
 
@@ -257,7 +254,7 @@ copy_tree() {
 }
 
 copy_tree "prometheus/rules" "*.yml"
-copy_tree "grafana/provisioning" "dashboards.yml"
+copy_tree "grafana/provisioning/dashboards" "*.yml"
 copy_tree "grafana/dashboards" "*.json"
 
 # ---------- Validate rendered output ----------
