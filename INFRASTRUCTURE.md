@@ -156,6 +156,20 @@ This is part of the project's commitment to ops transparency, particularly durin
 - **Hostname lint** — `scripts/lint/check-template-hostnames.sh` (in this meta-repo).
 - **Pre-commit hooks** — `.pre-commit-config.yaml` includes the hostname lint; `.gitleaks.toml` includes Telegram bot token / Slack webhook / Sentry DSN regex rules.
 
+### Per-environment deployment matrix
+
+The stack is multi-env-aware via three identity labels on every metric series. Each cluster (physical VPS or container set) runs its own self-contained observability stack and tags series accordingly:
+
+| Cluster | `AREAL_ENV` | `AREAL_CLUSTER` | `SOLANA_NETWORK` | Activated |
+|---|---|---|---|---|
+| Fornex (test-validator) | `testnet` | `fornex` | `solana-test-validator` | Phase 20 (now) |
+| Future devnet | `devnet` | (TBD) | `devnet` | When devnet bots ship |
+| Future mainnet | `mainnet` | (TBD; separate VPS) | `mainnet` | When mainnet bots ship |
+
+`AREAL_ENV` is the business/severity tier — Alertmanager can route `env=mainnet` alerts to a paging channel and `env=testnet` to a quiet dev channel. `SOLANA_NETWORK` is decoupled from `AREAL_ENV` so a staging tier can point at devnet or a dev tier can point at the local test-validator.
+
+To inspect multiple envs in one Grafana, configure multiple Prometheus datasources (one per cluster). No federation needed at this scale.
+
 ### Operator runbook (manual post-pipeline actions)
 
 Phase 20 ships the artifacts. Bringing them up on the Fornex VPS is an **operator action** not automated by the pipeline.
