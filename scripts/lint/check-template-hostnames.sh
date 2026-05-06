@@ -26,6 +26,10 @@ HOSTNAME_RE='[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+'
 WHITELIST_LITERALS=(
   '127.0.0.1'
   '0.0.0.0'
+  # Docker-host gateway alias used by prometheus to reach host-network
+  # services (node-exporter on Phase 20, bots on Phase 21+). Declared via
+  # `extra_hosts: ["host.docker.internal:host-gateway"]` in docker-compose.
+  'host.docker.internal'
 )
 
 # Whitelist suffixes: any matched hostname ending with one of these is allowed.
