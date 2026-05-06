@@ -53,3 +53,31 @@ regexes = [
 # extra rigor. Useful when reviewing changes to security-sensitive areas.
 # (Empty for now — defaults are fine.)
 stopwords = []
+
+# Phase 20 — observability secrets
+# These rules ADD to the inherited default ruleset (useDefault = true above)
+# and target the secret formats introduced by the Phase 20 alerting +
+# error-tracking integrations (Telegram, Slack, Sentry / GlitchTip).
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot API token"
+regex = '''[0-9]{8,10}:[A-Za-z0-9_-]{35}'''
+tags = ["secret", "telegram"]
+
+[[rules]]
+id = "slack-webhook"
+description = "Slack incoming webhook URL"
+regex = '''https://hooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{20,40}'''
+tags = ["secret", "slack"]
+
+[[rules]]
+id = "sentry-dsn-saas"
+description = "Sentry SaaS DSN"
+regex = '''https://[a-f0-9]{32}@(?:[a-z0-9-]+\.)?ingest\.(?:[a-z0-9-]+\.)?sentry\.io/[0-9]+'''
+tags = ["secret", "sentry"]
+
+[[rules]]
+id = "sentry-dsn-self-host"
+description = "Sentry self-hosted / GlitchTip DSN"
+regex = '''https://[a-f0-9]{32}@[a-z0-9.-]+/[0-9]+'''
+tags = ["secret", "sentry"]

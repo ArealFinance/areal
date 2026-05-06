@@ -23,3 +23,16 @@ repos:
         # bot vanity keypairs that are safe to commit, .env.example
         # placeholders).
         args: ["--config", ".gitleaks.toml", "protect", "--staged", "--verbose"]
+
+  # Phase 20 — reject literal hostnames in observability templates.
+  # The script walks bots/observability/**/*.template.{yml,ini} itself, so
+  # pass_filenames is false; pre-commit only triggers it when a matching
+  # file is staged.
+  - repo: local
+    hooks:
+      - id: check-template-hostnames
+        name: Reject literal hostnames in observability templates
+        entry: scripts/lint/check-template-hostnames.sh
+        language: script
+        files: '^bots/observability/.*\.template\.(yml|ini)$'
+        pass_filenames: false
