@@ -57,18 +57,18 @@ stopwords = []
 # Phase 20 — observability secrets
 # These rules ADD to the inherited default ruleset (useDefault = true above)
 # and target the secret formats introduced by the Phase 20 alerting +
-# error-tracking integrations (Telegram, Slack, Sentry / GlitchTip).
+# error-tracking integrations.
+#
+# Slack incoming-webhook URLs are NOT redefined here — gitleaks' default
+# ruleset already ships a `slack-webhook-url` detector that catches the
+# canonical 24-char form. Phase 21.5 W-20-01 dropped our local copy to
+# avoid double-firing on the same finding (gitleaks does not de-duplicate
+# across rule IDs).
 [[rules]]
 id = "telegram-bot-token"
 description = "Telegram bot API token"
 regex = '''[0-9]{8,10}:[A-Za-z0-9_-]{35}'''
 tags = ["secret", "telegram"]
-
-[[rules]]
-id = "slack-webhook"
-description = "Slack incoming webhook URL"
-regex = '''https://hooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{20,40}'''
-tags = ["secret", "slack"]
 
 [[rules]]
 id = "sentry-dsn-saas"
