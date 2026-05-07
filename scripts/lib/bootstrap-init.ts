@@ -150,6 +150,11 @@ interface OtRecord {
   yd_accumulator_pda?: string;
   reward_vault?: string;
   accumulator_usdc_ata?: string;
+  // RWT ATA owned by the YD accumulator PDA — written in the rwt-mint
+  // bootstrap phase so convert_to_rwt's `accumulator_rwt_ata` constraint
+  // resolves at CPI time. Optional because the field is set only after
+  // the rwt_mint has been provisioned.
+  accumulator_rwt_ata?: string;
   // Layer 10 substep 2 — ARL OT bootstrap extras (Phase 3 plan §63-77).
   // Populated only for the first OT (ARL) by phaseFutarchy / phaseDestinations
   // / phaseArlMint. Optional so non-ARL test OTs keep the existing shape.
