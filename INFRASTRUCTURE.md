@@ -246,6 +246,32 @@ Phase 20 ships the artifacts. Bringing them up on the Fornex VPS is an **operato
    ss -tlnp | grep -E ':(9090|9093|9100|9115|3000)\s'  # expect ALL bind 127.0.0.1
    ```
 
+### Cloudflared verification (Phase 22.5 / I3)
+
+The chain-invariants `cloudflared` ingress rule is operator-managed and lives outside this repo (in `/etc/cloudflared/config.yml` on the Fornex VPS). The rule order matters: the path-prefixed `/api/badges/*` rule MUST come before the bare-hostname Grafana rule, otherwise `cloudflared`'s first-match semantics route badge requests into Grafana — which serves HTML for `/api/*` instead of the shields.io JSON the public README expects.
+
+After every cloudflared config change (or VPS restart), run this smoke test from any external client to confirm path-routing is correct:
+
+```bash
+# Smoke: each chain-invariants badge MUST return shields.io JSON, NOT Grafana HTML.
+for badge in merkle-fresh nav-fresh authority-ok supply-ok; do
+  echo "--- $badge"
+  curl -fsS "https://status.areal.finance/api/badges/$badge" | jq .
+done
+```
+
+Expected output per badge: a shields.io endpoint envelope, e.g.
+```json
+{"schemaVersion": 1, "label": "merkle root", "message": "fresh", "color": "brightgreen", "cacheSeconds": 60}
+```
+
+Failure signatures:
+- Response is HTML (`<!DOCTYPE html>` / Grafana login page) → ingress order wrong; the path rule is being shadowed by the Grafana catch-all. Re-check `/etc/cloudflared/config.yml` rule order and `cloudflared --version` (path-based ingress requires `>= 2023.x`).
+- 502 / connection refused → `chain-invariants` exporter not running on `127.0.0.1:9201`. Check `systemctl status chain-invariants` on the VPS.
+- 404 with shields.io-shaped JSON → the badge name is mistyped; valid names are `merkle-fresh`, `nav-fresh`, `authority-ok`, `supply-ok`.
+
+This is a **manual post-deploy verification step** — not currently automated. It is enumerated here so the operator never silently ships a broken ingress.
+
 ### Updating the stack
 
 Pull latest meta-repo + `bots/` submodule, then re-run bootstrap:
