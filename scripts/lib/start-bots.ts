@@ -148,6 +148,10 @@ interface BotSpec {
   /** For merkle-publisher: a relative path under bots/<dir> that holds the
    *  bot's keypair file. */
   localKeypairPath?: string;
+  /** Phase 21: prom-client HTTP scrape port (127.0.0.1 bind). Locked per
+   *  the architect's bot-port matrix; must match the targets list in
+   *  bots/observability/prometheus/prometheus.template.yml. */
+  metricsPort: number;
 }
 
 const BOT_REGISTRY: BotSpec[] = [
@@ -156,6 +160,7 @@ const BOT_REGISTRY: BotSpec[] = [
     dir: 'pool-rebalancer',
     npmScript: 'start',
     keypairBotName: 'pool-rebalancer',
+    metricsPort: 9103,
   },
   {
     name: 'merkle-publisher',
@@ -163,30 +168,35 @@ const BOT_REGISTRY: BotSpec[] = [
     npmScript: 'start',
     keypairBotName: 'merkle-publisher',
     localKeypairPath: 'local-mock-keypair.json',
+    metricsPort: 9101,
   },
   {
     name: 'revenue-crank',
     dir: 'revenue-crank',
     npmScript: 'start',
     keypairBotName: 'revenue-crank',
+    metricsPort: 9102,
   },
   {
     name: 'convert-and-fund-crank',
     dir: 'convert-and-fund-crank',
     npmScript: 'start',
     keypairBotName: 'convert-and-fund-crank',
+    metricsPort: 9104,
   },
   {
     name: 'yield-claim-crank',
     dir: 'yield-claim-crank',
     npmScript: 'start',
     keypairBotName: 'yield-claim-crank',
+    metricsPort: 9105,
   },
   {
     name: 'nexus-manager',
     dir: 'nexus-manager',
     npmScript: 'start',
     keypairBotName: 'nexus-manager',
+    metricsPort: 9106,
   },
 ];
 
@@ -738,12 +748,16 @@ async function waitForFirstRoot(
  * already loads its own `.env` via dotenv at startup, so the orchestrator
  * only needs to forward the absolute minimum.
  */
-function buildChildEnv(): NodeJS.ProcessEnv {
+function buildChildEnv(spec: BotSpec): NodeJS.ProcessEnv {
   const childEnv: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? '',
     HOME: process.env.HOME ?? '',
     LANG: process.env.LANG ?? 'C',
     NODE_ENV: process.env.NODE_ENV ?? '',
+    // Phase 21: bots read BOT_METRICS_PORT to bind their prom-client
+    // HTTP server on 127.0.0.1:<port>. Ports are locked per BotSpec
+    // and must match prometheus.template.yml's bots-${AREAL_ENV} job.
+    BOT_METRICS_PORT: String(spec.metricsPort),
   };
   if (process.env.RPC_URL) childEnv.RPC_URL = process.env.RPC_URL;
   return childEnv;
@@ -818,7 +832,7 @@ function spawnBot(
     cwd,
     detached: true, // survive the orchestrator process exit
     stdio: ['ignore', out, err],
-    env: buildChildEnv(),
+    env: buildChildEnv(spec),
   });
 
   // Best-effort close of the parent's copy of the file descriptors so the
