@@ -1,0 +1,30 @@
+name: Deploy Bots (Phase 21+ TODO)
+on:
+  workflow_dispatch: {}
+  # TODO(Phase 21): enable push trigger once bots metric pipeline is deployed:
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - 'bots'
+  #     - '.github/workflows/deploy-bots.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-bots
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ !contains(github.event.head_commit.message, '[skip deploy]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Placeholder
+        run: |
+          echo "deploy-bots workflow is a Phase 25 skeleton."
+          echo "Phase 21+ will fill in: SSH agent, ssh deploy-bots, telegram notify."
+          echo "Currently a no-op so the workflow file exists in main and can be"
+          echo "iterated incrementally."
+          exit 0
