@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
     paths:
+      # NOTE: bare directory name matches the gitlink (submodule pointer) change.
+      # Do NOT change to 'app/**' — globs do not traverse submodule boundaries.
       - 'app'
       - 'scripts/deploy-app.sh'
       - '.github/workflows/deploy-app.yml'

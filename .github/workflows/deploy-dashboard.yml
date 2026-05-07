@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
     paths:
+      # NOTE: bare directory name matches the gitlink (submodule pointer) change.
+      # Do NOT change to 'dashboard/**' — globs do not traverse submodule boundaries.
       - 'dashboard'
       - 'scripts/deploy-dashboard.sh'
       - '.github/workflows/deploy-dashboard.yml'
