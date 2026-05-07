@@ -71,12 +71,9 @@ Production: https://panel.areal.finance (nginx, SPA fallback on `index.html`).
 
 ### Deploy
 
-```bash
-cp .env.example .env          # set DEPLOY_HOST, DEPLOY_PATH
-npm run dashboard:deploy      # vite build + rsync
-```
-
-The script (`scripts/deploy-dashboard.sh`) reads `DEPLOY_HOST` and `DEPLOY_PATH` from `.env`, runs `npm run dashboard:build`, then `rsync -az --delete` into the remote path.
+Deploy is automated — see `## Deploy automation` below. The legacy
+`scripts/deploy-dashboard.sh` is retained as an emergency manual fallback
+only and will be removed in Phase 26.
 
 ### Nginx sketch (for self-hosting)
 
@@ -253,6 +250,97 @@ The `Infra` dashboard is currently provisioned in the public default folder so `
 - Anonymous Grafana access is **Viewer only** with **Explore globally disabled**.
 - Cloudflared tunnel handles DDoS protection and TLS termination — no public ports opened on the VPS for the observability stack itself.
 - Pre-commit hooks: `gitleaks` scans for Telegram bot tokens, Slack webhooks, Sentry DSN. `check-template-hostnames.sh` rejects literal hostnames in `bots/observability/**/*.template.{yml,ini}` (whitelist: `localhost`, `127.0.0.1`, `0.0.0.0`, `${VAR}`, docker-compose service names).
+
+## Deploy automation
+
+All deployable artefacts ship through GitHub Actions. On-chain contract
+deploys remain a manual ceremony and are NEVER routed through Actions.
+
+### Workflows
+
+| Workflow | Trigger paths | SSH verb on VPS |
+|----------|---------------|-----------------|
+| `.github/workflows/deploy-observability.yml` | `observability/`, `scripts/observability/` | `deploy-observability` |
+| `.github/workflows/deploy-dashboard.yml` | `dashboard` (gitlink), `scripts/deploy-dashboard.sh` | `deploy-dashboard` |
+| `.github/workflows/deploy-app.yml` | `app` (gitlink), `scripts/deploy-app.sh` | `deploy-app` |
+| `.github/workflows/deploy-bots.yml` | `workflow_dispatch` only — Phase 21+ TODO | `deploy-bots` |
+
+### Secrets (set per repo via `gh secret set`)
+
+- `DEPLOYER_SSH_KEY` — private half of the deployer keypair (ed25519).
+- `DEPLOYER_HOST` — Fornex VPS hostname.
+- `TELEGRAM_CI_BOT_TOKEN` — `@BotFather` token for CI bot.
+- `TELEGRAM_CI_CHAT_ID` — chat id for failure alerts.
+- `NPM_TOKEN` — only in `arlex-client` / `areal-sdk` repos (publish workflows out of scope for this repo).
+
+### `[skip deploy]` convention
+
+Including the literal string `[skip deploy]` anywhere in a commit message
+short-circuits all deploy workflows BEFORE secrets are loaded. Use it for
+docs-only or workflow-only commits that should not trigger a deploy.
+
+### Bots-repo deploy convention (Option A)
+
+Bots changes flow into production ONLY via meta submodule pointer bumps.
+Pushing directly to `bots/main` does not trigger a deploy. Bumping the
+`bots` pointer in meta does. This single channel preserves the meta repo
+as the source of truth for what is deployed.
+
+### Failure runbook
+
+Every deploy workflow's failure path posts to the CI Telegram chat with
+a link to the failed run. Steps to triage:
+
+1. Open the linked Actions run; read the SSH step output.
+2. SSH to VPS as `deployer` (manual operator key) and run the `health` verb.
+3. If sudoers or wrapper changed, re-run `scripts/setup-deployer-user.sh`.
+4. Last resort: invoke `scripts/deploy-dashboard.sh` manually (dashboard only, emergency fallback).
+
+### Manual operator setup (one-time per fresh VPS)
+
+1. Generate keypair locally: `ssh-keygen -t ed25519 -f ./areal_deployer -C "areal-ci"`.
+2. Archive the private half offline (1Password / KMS / `pass`).
+3. SCP the public half to `root@<VPS>`, then run as root:
+   ```bash
+   sudo bash scripts/setup-deployer-user.sh /tmp/areal_deployer.pub
+   ```
+4. `gh secret set DEPLOYER_SSH_KEY < ./areal_deployer` in meta repo.
+5. `gh secret set DEPLOYER_HOST -b "<vps-hostname>"`.
+6. Create CI Telegram bot via `@BotFather`; capture token.
+7. Get `chat_id` (forward a message from target chat to `@userinfobot`).
+8. `gh secret set TELEGRAM_CI_BOT_TOKEN`, `gh secret set TELEGRAM_CI_CHAT_ID`.
+9. Cloudflare DNS: CNAME `status.areal.finance` → tunnel hostname.
+10. cloudflared ingress rule: `status.areal.finance → 127.0.0.1:3000`.
+11. UptimeRobot: 3 monitors (status page, dashboard, app).
+
+### VPS-side `/usr/local/sbin/areal-deploy-*` contracts
+
+The forced-command wrapper at `/usr/local/bin/areal-deploy` invokes
+`/usr/local/sbin/areal-deploy-observability`, `-dashboard`, `-app`. Each
+must be a no-arg shell script that exits 0 on success and writes errors
+to stderr. Recommended one-line wrappers (operator-installed, not in any
+submodule):
+
+```bash
+# /usr/local/sbin/areal-deploy-observability
+#!/usr/bin/env bash
+exec /opt/areal/scripts/observability/bootstrap-fornex.sh
+
+# /usr/local/sbin/areal-deploy-dashboard
+#!/usr/bin/env bash
+cd /opt/areal && git pull && git submodule update --remote dashboard \
+  && cd dashboard && npm ci && npm run build \
+  && rsync -az --delete build/ /var/www/panel.areal.finance/
+
+# /usr/local/sbin/areal-deploy-app — equivalent for app/
+```
+
+### What CI cannot test
+
+The static checks (`actionlint`, `shellcheck`, `visudo --check`) catch
+shape errors but never the live channel. The first real validation of
+every workflow file is its first real run. **Phase 20's first deploy IS
+Phase 25's acceptance test.**
 
 ## Updating `@arlex/client`
 
