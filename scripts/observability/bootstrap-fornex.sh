@@ -373,12 +373,11 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
   fi
   log "  grafana healthy"
 
-  curl -fsS http://127.0.0.1:9100/metrics | head -1 >/dev/null \
+  curl -fsS -o /dev/null http://127.0.0.1:9100/metrics \
     || die "node-exporter not responding" 7
   log "  node-exporter responding"
 
-  curl -fsS "http://127.0.0.1:9115/probe?target=https://www.cloudflare.com&module=http_2xx" \
-    | head -1 >/dev/null \
+  curl -fsS -o /dev/null "http://127.0.0.1:9115/probe?target=https://www.cloudflare.com&module=http_2xx" \
     || die "blackbox-exporter probe failed" 7
   log "  blackbox-exporter probe ok"
 
