@@ -257,6 +257,14 @@ const BOT_REGISTRY: BotSpec[] = [
         'EXPECTED_AUTHORITY_DEX_CONFIG',
         'EXPECTED_AUTHORITY_YD_DISTRIBUTION_CONFIG',
         'CHAIN_INVARIANTS_POLL_INTERVAL_MS',
+        // Optional: when set, chain-invariants validates the 3 per-OT PDAs
+        // (PDA_OT_GOVERNANCE, PDA_FUTARCHY_CONFIG, PDA_YD_MERKLE_DISTRIBUTOR)
+        // against SDK-derived values pinned to this OT mint. When unset, the
+        // bot logs `pda_self_derivation_partial` and skips per-OT validation.
+        // Without this passthrough, OT_MINT was unreachable under SEC-57
+        // narrow-env, defeating I1's per-OT branch in production (Phase 22.5
+        // architect-review F2).
+        'OT_MINT',
       ] as const;
       for (const k of passthrough) {
         const v = process.env[k];
