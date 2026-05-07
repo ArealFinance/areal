@@ -410,6 +410,30 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
   fi
 fi
 
+# ---------- Grafana org rename (idempotent) ----------
+# Anonymous viewer uses org_id=1 (default org), but we want the public-facing
+# org to display the configured name (e.g. "Areal Public"). Rename the default
+# org via API on every bootstrap — idempotent: if name already matches, the
+# PUT is a no-op.
+if [[ ${DRY_RUN} -eq 0 ]]; then
+  log "ensuring Grafana default org is named '${GF_AUTH_ANONYMOUS_ORG_NAME}'"
+  for _ in $(seq 1 30); do
+    if curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  org_payload=$(printf '{"name":"%s"}' "${GF_AUTH_ANONYMOUS_ORG_NAME}")
+  if curl -fsS -u "${GF_SECURITY_ADMIN_USER}:${GF_SECURITY_ADMIN_PASSWORD}" \
+       -X PUT http://127.0.0.1:3000/api/orgs/1 \
+       -H "Content-Type: application/json" \
+       -d "${org_payload}" >/dev/null; then
+    log "  grafana org name set to '${GF_AUTH_ANONYMOUS_ORG_NAME}'"
+  else
+    log "  WARN: failed to set grafana org name (continuing — anonymous still works via org_id=1)"
+  fi
+fi
+
 # ---------- Final summary ----------
 log "----- DONE -----"
 log "rendered files: ${RENDERED_DIR}"
