@@ -344,12 +344,33 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
   fi
   log "  prometheus ready"
 
-  curl -fsS http://127.0.0.1:9093/-/ready >/dev/null \
-    || die "alertmanager not ready" 7
+  # Wait up to 30s for alertmanager.
+  ready=0
+  for _ in $(seq 1 30); do
+    if curl -fsS http://127.0.0.1:9093/-/ready >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ ${ready} -eq 0 ]]; then
+    die "alertmanager not ready after 30s" 7
+  fi
   log "  alertmanager ready"
 
-  curl -fsS http://127.0.0.1:3000/api/health >/dev/null \
-    || die "grafana not healthy" 7
+  # Wait up to 60s for grafana (cold-start can take 15-30s for migrations
+  # on first run / fresh volume).
+  ready=0
+  for _ in $(seq 1 60); do
+    if curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ ${ready} -eq 0 ]]; then
+    die "grafana not healthy after 60s" 7
+  fi
   log "  grafana healthy"
 
   curl -fsS http://127.0.0.1:9100/metrics | head -1 >/dev/null \
