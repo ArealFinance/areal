@@ -196,15 +196,33 @@ Phase 20 ships the artifacts. Bringing them up on the Fornex VPS is an **operato
 
    To preview without applying: `sudo /opt/areal/scripts/observability/bootstrap-fornex.sh --dry-run`.
 
-4. **Cloudflared route.** The Fornex VPS already runs a `cloudflared` tunnel. Add a new ingress rule mapping `status.areal.finance` to `http://127.0.0.1:3000`:
+4. **Cloudflared route.** The Fornex VPS already runs a `cloudflared` tunnel. Add ingress rules mapping `status.areal.finance` to Grafana on `127.0.0.1:3000` and the chain-invariants badge endpoints on `127.0.0.1:9201`:
    ```yaml
    # in your existing /etc/cloudflared/config.yml (NOT in this repo):
    ingress:
+     # Phase 22 — chain-invariants badges. The path-prefixed rule MUST come
+     # before the bare-hostname Grafana rule, otherwise cloudflared's
+     # first-match semantics route /api/badges/* into Grafana (which would
+     # 404 — Grafana's /api/* is auth-gated). Path-based ingress requires
+     # cloudflared >= 2023.x; verify with `cloudflared --version` before
+     # rolling out, otherwise the rule is silently ignored and badges 404.
+     - hostname: status.areal.finance
+       path: /api/badges/.*
+       service: http://127.0.0.1:9201
+     # Phase 20 — Grafana on the bare hostname.
      - hostname: status.areal.finance
        service: http://127.0.0.1:3000
      - service: http_status:404  # default catch-all (keep at end)
    ```
    Then: `sudo cloudflared service restart`.
+
+   Verify badges work end-to-end after restart:
+   ```bash
+   # From an external client (your laptop):
+   curl -fsS https://status.areal.finance/api/badges/merkle-fresh | jq .
+   # Expect: {"schemaVersion":1,"label":"merkle root","message":"...","color":"...","cacheSeconds":...}
+   ```
+   If the response comes back as Grafana HTML instead of JSON, the path rule was ignored (`cloudflared` too old) — see the version note above.
 
 5. **Cloudflare DNS.** In the Cloudflare dashboard for `areal.finance`:
    - Add CNAME record: `status` → `<your-tunnel-id>.cfargotunnel.com`

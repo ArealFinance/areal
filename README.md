@@ -8,6 +8,15 @@ This repository is a **meta-repo** that aggregates the five components of Areal 
 - **Admin panel:** https://panel.areal.finance
 - **Twitter:** [@areal_finance](https://twitter.com/areal_finance)
 
+### Live chain invariants
+
+These badges read live values from the chain-invariants exporter on the operator VPS via the `status.areal.finance` Cloudflare tunnel. Each is updated every 30–60 seconds by [shields.io](https://shields.io/) against the `/api/badges/<name>` endpoint of the read-only watchdog. Click any badge for the matching incident runbook.
+
+[![Merkle Root Fresh](https://img.shields.io/endpoint?url=https%3A%2F%2Fstatus.areal.finance%2Fapi%2Fbadges%2Fmerkle-fresh)](https://docs.areal.finance/operations/runbooks/merkle-root-stale)
+[![NAV Fresh](https://img.shields.io/endpoint?url=https%3A%2F%2Fstatus.areal.finance%2Fapi%2Fbadges%2Fnav-fresh)](https://docs.areal.finance/operations/runbooks/nav-stale)
+[![Authority OK](https://img.shields.io/endpoint?url=https%3A%2F%2Fstatus.areal.finance%2Fapi%2Fbadges%2Fauthority-ok)](https://docs.areal.finance/operations/runbooks/authority-drift)
+[![RWT Supply OK](https://img.shields.io/endpoint?url=https%3A%2F%2Fstatus.areal.finance%2Fapi%2Fbadges%2Fsupply-ok)](https://docs.areal.finance/operations/runbooks/rwt-supply-drift)
+
 > **Layer 10 status (2026-04-29).** Layer 10 (bootstrap orchestration + zero-deployer-authority handover + audit/reproducibility tooling) is **code-complete** and frozen. The R20 RWT_MINT pin migration shipped behind a compile-time tripwire (`cargo build-sbf` fails if the dev-placeholder mint feature is on for a production build). All five contract-state authorities rotate atomically to the multisig in Phase 7; deployer-zero-authority is verified post-rotation by both POSITIVE and NEGATIVE on-chain audits. See [`docs.areal.finance/architecture/layer10-bootstrap`](https://docs.areal.finance/architecture/layer10-bootstrap) for the deploy walkthrough.
 
 ---
