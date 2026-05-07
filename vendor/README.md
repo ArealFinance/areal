@@ -4,39 +4,39 @@ Vendored npm tarballs consumed by submodules via `file:` dependencies.
 
 ## Multiple versions during migration
 
-This directory may hold **multiple versions of `@arlex/client` side-by-side** during a migration window, so each consumer can move independently. Currently single-version (all consumers on 0.3.0 after Phase 3.5 C.2 vendor refresh, 2026-05-07).
+This directory may hold **multiple versions of `@arlex/client` side-by-side** during a migration window, so each consumer can move independently. Currently single-version (all consumers on 0.3.1 after Phase 3.5 C.3 vendor refresh, 2026-05-07; previous 0.3.0 tarball pruned in the same step).
 
 | Tarball | Consumed by | Migrated in |
 |---|---|---|
-| `arlex-client-0.3.0.tgz` | `dashboard/`, `sdk/`, `app/` | Phase 3.5 C.2 (2026-05-07) |
+| `arlex-client-0.3.1.tgz` | `dashboard/`, `sdk/`, `app/` | Phase 3.5 C.3 (2026-05-07) |
 
 Older tarballs are removed only after **all consumers have moved off them** AND the integration plan marks the migration step closed. Do not delete a tarball just because it appears unreferenced — confirm in `plan/integration-plan.md` first.
 
-## arlex-client-0.3.0.tgz
+## arlex-client-0.3.1.tgz
 
 | Field | Value |
 |---|---|
-| Package | `@arlex/client@0.3.0` |
+| Package | `@arlex/client@0.3.1` |
 | Source repo | https://github.com/ArealFinance/arlex |
 | Source path | `framework/client/` |
-| Source SHA | `bf349ca` (Phase 3.5 codegen K merge, PR #6) |
-| Branch | `main` (tag `v0.3.0`) |
+| Source SHA | `v0.3.1` (framework PR #7) |
+| Branch | `main` (tag `v0.3.1`) |
 | Packed | 2026-05-07 |
 | Build | `npm run build && npm pack` (in `framework/client/`) |
-| Tarball SHA256 | `6e98e6e2411bfd9c10398ce0ed8fdc6cbbd2a38edfb2b7cabc52f0d86af1e431` |
-| Consumers | `dashboard/`, `sdk/`, `app/` (via `file:../vendor/arlex-client-0.3.0.tgz`) |
+| Tarball SHA256 | `90ffc9dc96fb73d43a510b93c641deca3fda4a431fd0b80d321d96e0d725205b` |
+| Consumers | `dashboard/`, `sdk/`, `app/` (via `file:../vendor/arlex-client-0.3.1.tgz`) |
 
 Verify with:
 ```bash
-shasum -a 256 vendor/arlex-client-0.3.0.tgz
-# expected: 6e98e6e2411bfd9c10398ce0ed8fdc6cbbd2a38edfb2b7cabc52f0d86af1e431
+shasum -a 256 vendor/arlex-client-0.3.1.tgz
+# expected: 90ffc9dc96fb73d43a510b93c641deca3fda4a431fd0b80d321d96e0d725205b
 ```
 
-What 0.3.0 adds over 0.2.2 (BREAKING for codegen output layout):
-- Codegen K: shared defined types (structs/enums referenced from multiple accounts/instructions) are now extracted into a separate file `defined-types.generated.ts` per program, instead of being duplicated in `accounts.generated.ts` and `instructions.generated.ts`.
-- 4 generated files per program now: `accounts.generated.ts`, `instructions.generated.ts`, `defined-types.generated.ts`, plus the program index re-export.
-- Generated runtime API surface unchanged for consumers that only use the program index re-export. Consumers that imported defined types directly from `accounts.generated` / `instructions.generated` need to update import paths.
-- Consumer `package.json` peerDependency range bumped to `^0.3.0`.
+What 0.3.1 adds over 0.3.0 (non-breaking runtime extension):
+- Runtime now applies pubkey overrides at decode time: `[u8;32]` fields listed in the per-account `PUBKEY_<NAME>_FIELDS` constants are wrapped as `PublicKey` instances by generated parsers, instead of returning raw `number[]` and requiring consumer-side adapters.
+- Codegen emits the per-account `PUBKEY_<NAME>_FIELDS` constant arrays and threads them into the runtime parsers.
+- Consumer-side `toPublicKey` adapters (e.g., `bots/nexus-manager/src/nexus-state-reader.ts`) were removed in C.3 (now redundant).
+- No public API surface changes; consumer `peerDependencies` range `^0.3.0` continues to satisfy.
 
 ## Why vendored
 
@@ -49,7 +49,7 @@ See **`INFRASTRUCTURE.md` → "Updating @arlex/client"** for the full step-by-st
 Short version (for the current major version, e.g. 0.3.x):
 1. Edit `framework/client/` (e.g., bug fix or feature).
 2. `cd framework/client && npm test && npm run build && npm pack`.
-3. `cp framework/client/arlex-client-0.3.0.tgz vendor/`.
+3. `cp framework/client/arlex-client-<version>.tgz vendor/`.
 4. For each consumer (`dashboard/`, `sdk/`, `app/`): `rm -rf node_modules/@arlex package-lock.json && npm install`.
 5. Commit framework, consumers, and meta separately, in that order.
 
