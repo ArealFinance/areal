@@ -382,17 +382,25 @@ if [[ ${DRY_RUN} -eq 0 ]]; then
     || die "blackbox-exporter probe failed" 7
   log "  blackbox-exporter probe ok"
 
-  # End-to-end query: prometheus must report `up==1` for prometheus + node
-  # jobs (proves the in-container scrape connectivity actually works, not
-  # just that each /metrics endpoint individually responds on host loopback).
-  # Wait up to 30s for the first scrape cycle to land.
-  log "  verifying prometheus scrape connectivity (up == 1 for prometheus + node)"
+  # End-to-end query: prometheus must report `up==1` for the scrape jobs
+  # whose targets are part of THIS docker-compose stack (prometheus,
+  # node-exporter, blackbox-http). bots-* / chain-invariants-* may legitimately
+  # be UP=0 if the bot processes aren't running yet — those have their own
+  # alerts (BotDown) and are not a bootstrap failure. The query filters by
+  # job to keep the check narrowly scoped to "in-container scrape
+  # connectivity actually works".
+  log "  verifying prometheus scrape connectivity (up{job=~prometheus|node|blackbox-http} == 1)"
   e2e_ready=0
   for _ in $(seq 1 30); do
-    resp=$(curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up' 2>/dev/null || true)
+    resp=$(curl -fsSG 'http://127.0.0.1:9090/api/v1/query' \
+             --data-urlencode 'query=up{job=~"prometheus|node|blackbox-http"} == 1' \
+             2>/dev/null || true)
+    # Each of the 3 expected jobs must appear with up==1. blackbox-http
+    # has 3 targets (panel/app/rpc), so it can return 0..3 series; we just
+    # need its job= label to appear at least once.
     if printf '%s' "${resp}" | grep -q '"job":"prometheus"' \
        && printf '%s' "${resp}" | grep -q '"job":"node"' \
-       && printf '%s' "${resp}" | grep -qv '"value":\[[0-9.]*,"0"\]'; then
+       && printf '%s' "${resp}" | grep -q '"job":"blackbox-http"'; then
       e2e_ready=1
       break
     fi
