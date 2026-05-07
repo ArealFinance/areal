@@ -273,11 +273,16 @@ deploys remain a manual ceremony and are NEVER routed through Actions.
 - `TELEGRAM_CI_CHAT_ID` — chat id for failure alerts.
 - `NPM_TOKEN` — only in `arlex-client` / `areal-sdk` repos (publish workflows out of scope for this repo).
 
+> Note on naming: the original Phase 25 plan used `VPS_DEPLOYER_*` prefixes
+> and a separate `VPS_DEPLOYER_USER`. The implementation finalised on
+> `DEPLOYER_*` — the user is fixed to `deployer` by the forced-command
+> wrapper, so a per-deploy user secret was redundant.
+
 ### `[skip deploy]` convention
 
 Including the literal string `[skip deploy]` anywhere in a commit message
-short-circuits all deploy workflows BEFORE secrets are loaded. Use it for
-docs-only or workflow-only commits that should not trigger a deploy.
+skips the deploy job entirely — no step runs and no secret is dereferenced.
+Use it for docs-only or workflow-only commits that should not trigger a deploy.
 
 ### Bots-repo deploy convention (Option A)
 
@@ -304,6 +309,10 @@ a link to the failed run. Steps to triage:
    ```bash
    sudo bash scripts/setup-deployer-user.sh /tmp/areal_deployer.pub
    ```
+3a. Install the three VPS-side wrapper scripts at
+   `/usr/local/sbin/areal-deploy-{observability,dashboard,app}` per the
+   *VPS-side contracts* subsection below. Without them, the first deploy
+   will hit `command not found` on the VPS.
 4. `gh secret set DEPLOYER_SSH_KEY < ./areal_deployer` in meta repo.
 5. `gh secret set DEPLOYER_HOST -b "<vps-hostname>"`.
 6. Create CI Telegram bot via `@BotFather`; capture token.
