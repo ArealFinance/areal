@@ -326,6 +326,31 @@ else
   ( cd "${RENDERED_DIR}" && docker compose pull && docker compose up -d )
 fi
 
+# ---------- Prometheus runtime reload ----------
+# `docker compose up -d` only re-creates a container if the image or env
+# changed; it does NOT restart on rule-file content changes (mounted via
+# volumes). Prometheus needs an explicit lifecycle reload to re-read
+# rules/*.yml + scrape config. Idempotent — first deploy reloads a freshly
+# started Prometheus (no-op effect); subsequent deploys with new rules
+# pick them up without container restart.
+#
+# `--web.enable-lifecycle` is set in docker-compose.template.yml command:.
+if [[ ${DRY_RUN} -eq 0 ]]; then
+  log "reloading prometheus runtime config"
+  # Wait briefly in case prometheus is in the middle of starting up.
+  for _ in $(seq 1 10); do
+    if curl -fsS http://127.0.0.1:9090/-/ready >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if curl -fsS -X POST http://127.0.0.1:9090/-/reload >/dev/null 2>&1; then
+    log "  prometheus reload OK"
+  else
+    log "  WARN: prometheus reload failed (continuing — first deploy is OK; existing config still in effect)"
+  fi
+fi
+
 # ---------- Smoke checks ----------
 if [[ ${DRY_RUN} -eq 0 ]]; then
   log "running smoke checks"
