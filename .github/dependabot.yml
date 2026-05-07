@@ -1,0 +1,21 @@
+# Phase 21.5 — automated supply-chain refresh for GitHub Actions.
+#
+# We pin every action to a commit SHA (`@<sha> # <tag>`) for supply-chain
+# safety; that means we no longer drift forward automatically when an
+# upstream action ships a security patch. Dependabot closes that loop by
+# opening a PR with the new SHA + tag comment whenever a tracked action
+# publishes a release.
+#
+# Grouping every action into a single PR keeps reviewer load down and
+# avoids interleaving unrelated bumps. The CI workflow runs on every PR,
+# so the bump is gated by the same checks as a human-authored change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
