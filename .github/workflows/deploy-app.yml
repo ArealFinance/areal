@@ -1,0 +1,57 @@
+name: Deploy App
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app'
+      - 'scripts/deploy-app.sh'
+      - '.github/workflows/deploy-app.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-app
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ !contains(github.event.head_commit.message, '[skip deploy]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Configure SSH agent
+        uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOYER_SSH_KEY }}
+
+      - name: Add VPS host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -t ed25519,rsa -H "${{ secrets.DEPLOYER_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Trigger remote deploy
+        run: |
+          ssh -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              -o ConnectTimeout=10 \
+              "deployer@${{ secrets.DEPLOYER_HOST }}" \
+              "deploy-app"
+
+      - name: Notify failure
+        if: failure()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_CI_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CI_CHAT_ID }}
+        run: |
+          curl -fsS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT}" \
+            -d parse_mode=Markdown \
+            -d text="*Deploy app FAILED* on \`${{ github.sha }}\` — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
