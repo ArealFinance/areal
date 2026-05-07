@@ -134,7 +134,13 @@ type BotName =
   | 'revenue-crank'
   | 'convert-and-fund-crank'
   | 'yield-claim-crank'
-  | 'nexus-manager';
+  | 'nexus-manager'
+  // Phase 22: read-only on-chain invariant exporter. No keypair, no
+  // funding, no signing — only RPC reads. Spawned alongside the TX bots
+  // so the same orchestrator is the single source of truth for "what
+  // is running" + the same idempotency / heartbeat / lock guarantees
+  // apply.
+  | 'chain-invariants';
 
 interface BotSpec {
   name: BotName;
@@ -152,6 +158,26 @@ interface BotSpec {
    *  the architect's bot-port matrix; must match the targets list in
    *  bots/observability/prometheus/prometheus.template.yml. */
   metricsPort: number;
+  /**
+   * Phase 22: read-only bots have no keypair and no on-chain authority.
+   * When true:
+   *   - resolveBotKeypairs() skips the bot (no `art.bots[name]` lookup,
+   *     no permission gate on a keypair file).
+   *   - fundBots() never sees the bot in its iteration.
+   *   - buildChildEnv() does NOT inject a BOT_KEYPAIR_PATH; instead the
+   *     spec's `envExtras` callback contributes the read-only bot's
+   *     own env contract (RPC_URL, PDA_*, EXPECTED_AUTHORITY_*, etc.).
+   * Architect Q3 lock: single-flag pattern over a parallel
+   * READ_ONLY_REGISTRY; future read-only watchers reuse the flag. */
+  readOnly?: boolean;
+  /**
+   * Phase 22: extra env vars contributed to the spawned process. Called
+   * lazily so the orchestrator can decide whether to surface a missing
+   * required value as a fatal at spawn-time vs. let the bot fail its own
+   * startup validation (the bot is the authority on its own env contract).
+   * For chain-invariants the contract is documented in
+   * bots/chain-invariants/README.md. */
+  envExtras?: () => NodeJS.ProcessEnv;
 }
 
 const BOT_REGISTRY: BotSpec[] = [
@@ -197,6 +223,47 @@ const BOT_REGISTRY: BotSpec[] = [
     npmScript: 'start',
     keypairBotName: 'nexus-manager',
     metricsPort: 9106,
+  },
+  // Phase 22 — chain-invariants exporter. Read-only watchdog: polls four
+  // on-chain invariants (merkle root age, NAV age, authority drift, RWT
+  // supply parity) and exposes them as Prometheus metrics on
+  // 127.0.0.1:9201. The bot has no keypair and signs nothing; envExtras
+  // forwards the PDA / EXPECTED_AUTHORITY_* contract from process.env so
+  // the bot's own loadConfig validates and fails fast on misconfig.
+  {
+    name: 'chain-invariants',
+    dir: 'chain-invariants',
+    npmScript: 'start',
+    metricsPort: 9201,
+    readOnly: true,
+    envExtras: (): NodeJS.ProcessEnv => {
+      // Whitelist of env vars the read-only bot reads; everything outside
+      // this set stays in the orchestrator. Required vs optional is
+      // enforced inside the bot (chain-invariants/src/index.ts loadConfig)
+      // — the orchestrator forwards whatever is set so a missing required
+      // var fails the bot's own startup with a descriptive error rather
+      // than a silent skip here.
+      const out: NodeJS.ProcessEnv = {};
+      const passthrough = [
+        'PDA_YD_MERKLE_DISTRIBUTOR',
+        'PDA_YD_DISTRIBUTION_CONFIG',
+        'PDA_RWT_VAULT',
+        'PDA_OT_GOVERNANCE',
+        'PDA_FUTARCHY_CONFIG',
+        'PDA_DEX_CONFIG',
+        'EXPECTED_AUTHORITY_OT_GOVERNANCE',
+        'EXPECTED_AUTHORITY_FUTARCHY_CONFIG',
+        'EXPECTED_AUTHORITY_RWT_VAULT',
+        'EXPECTED_AUTHORITY_DEX_CONFIG',
+        'EXPECTED_AUTHORITY_YD_DISTRIBUTION_CONFIG',
+        'CHAIN_INVARIANTS_POLL_INTERVAL_MS',
+      ] as const;
+      for (const k of passthrough) {
+        const v = process.env[k];
+        if (v !== undefined) out[k] = v;
+      }
+      return out;
+    },
   },
 ];
 
@@ -464,6 +531,13 @@ async function assertSubstep3Ready(conn: Connection, art: Artifact): Promise<voi
 function resolveBotKeypairs(art: Artifact): ResolvedBotKeypair[] {
   const out: ResolvedBotKeypair[] = [];
   for (const spec of BOT_REGISTRY) {
+    // Phase 22: read-only bots have no keypair file and no on-chain
+    // authority — skip the entire resolve path. This also keeps them out
+    // of fundBots iteration since fundBots only iterates this output.
+    if (spec.readOnly) {
+      log('main', `${spec.name.padEnd(25)} read-only — skipping keypair resolution`);
+      continue;
+    }
     let kpPath: string | undefined;
 
     // Source #1 — artifact-recorded keypair_path.
@@ -760,6 +834,14 @@ function buildChildEnv(spec: BotSpec): NodeJS.ProcessEnv {
     BOT_METRICS_PORT: String(spec.metricsPort),
   };
   if (process.env.RPC_URL) childEnv.RPC_URL = process.env.RPC_URL;
+  // Phase 22: read-only bots contribute their own env contract through
+  // envExtras — chain-invariants forwards the PDA / EXPECTED_AUTHORITY_*
+  // whitelist this way. envExtras is a function so the orchestrator
+  // re-reads process.env at spawn time (rather than at module load),
+  // which matters when the operator sources a fresh .env between runs.
+  if (spec.envExtras) {
+    Object.assign(childEnv, spec.envExtras());
+  }
   return childEnv;
 }
 
@@ -984,6 +1066,12 @@ async function startStage2(
     'convert-and-fund-crank',
     'yield-claim-crank',
     'nexus-manager',
+    // Phase 22: chain-invariants runs LAST in the post-block sequence —
+    // it depends on the genesis + nexus state being initialised but does
+    // not block any TX bot. Late spawn is also safest from a watchdog
+    // perspective: the on-chain state has settled before the exporter
+    // starts polling, avoiding flaps on first-poll-on-startup.
+    'chain-invariants',
   ];
 
   const spawned: SpawnedBot[] = [];
