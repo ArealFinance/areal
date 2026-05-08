@@ -306,17 +306,22 @@ run_migrations() {
   log_step "Running TypeORM migrations"
 
   if ((DRY_RUN)); then
-    log_info "[dry-run] would: docker compose exec backend npm run migration:run"
+    log_info "[dry-run] would: docker compose exec backend npm run migration:run:prod"
     return
   fi
 
   # Backend container needs a moment to initialize the Nest app before
-  # `exec` can find a healthy node process — but `migration:run` is a
+  # `exec` can find a healthy node process — but `migration:run:prod` is a
   # standalone CLI invocation, so it doesn't depend on the running app.
   # Just wait briefly for the container to be `running`.
+  #
+  # The `:prod` suffix is intentional: the runtime image only ships `dist/`
+  # (not `src/`) to keep the production tree minimal. The default
+  # `migration:run` script uses ts-node against `src/data-source.ts` which
+  # doesn't exist in the container — `:prod` points at `dist/data-source.js`.
   sleep 3
 
-  (cd "$TARGET_DIR" && docker compose -f docker-compose.prod.yml --env-file .env exec -T backend npm run migration:run)
+  (cd "$TARGET_DIR" && docker compose -f docker-compose.prod.yml --env-file .env exec -T backend npm run migration:run:prod)
   log_info "migrations applied"
 }
 
