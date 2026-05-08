@@ -1,0 +1,73 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app'
+      - 'dashboard'
+      - 'sdk'
+      - 'vendor/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which targets to deploy
+        type: choice
+        default: both
+        options: [app, dashboard, both]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-app:
+    name: app.areal.finance
+    if: github.event_name == 'push' || github.event.inputs.target == 'app' || github.event.inputs.target == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Trigger areal-deploy-app on Fornex
+        run: ssh -i ~/.ssh/id_ed25519 deployer@${{ secrets.DEPLOY_HOST }} deploy-app
+
+      - name: Smoke check
+        run: |
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://app.areal.finance/)
+            if [ "$code" = "200" ]; then echo "app.areal.finance OK"; exit 0; fi
+            echo "attempt $i: HTTP $code, retry in 10s"
+            sleep 10
+          done
+          echo "app.areal.finance failed smoke check"; exit 1
+
+  deploy-dashboard:
+    name: panel.areal.finance
+    if: github.event_name == 'push' || github.event.inputs.target == 'dashboard' || github.event.inputs.target == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Trigger areal-deploy-dashboard on Fornex
+        run: ssh -i ~/.ssh/id_ed25519 deployer@${{ secrets.DEPLOY_HOST }} deploy-dashboard
+
+      - name: Smoke check
+        run: |
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://panel.areal.finance/)
+            if [ "$code" = "200" ]; then echo "panel.areal.finance OK"; exit 0; fi
+            echo "attempt $i: HTTP $code, retry in 10s"
+            sleep 10
+          done
+          echo "panel.areal.finance failed smoke check"; exit 1
