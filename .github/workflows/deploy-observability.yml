@@ -1,0 +1,125 @@
+name: deploy-observability
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bots/observability/**'
+      - 'scripts/observability/**'
+      - 'scripts/lint/**'
+      - 'INFRASTRUCTURE.md'
+      - '.github/workflows/deploy-observability.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-observability
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    if: "!contains(github.event.head_commit.message, '[skip deploy]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Shellcheck observability scripts
+        run: |
+          set -euo pipefail
+          # Glob may not match on first runs — handle the no-files case gracefully.
+          shopt -s nullglob globstar
+          files=( \
+            scripts/observability/**/*.sh \
+            bots/observability/**/*.sh \
+            scripts/lint/**/*.sh \
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No observability shell scripts found yet — skipping shellcheck."
+            exit 0
+          fi
+          echo "Linting ${#files[@]} script(s):"
+          printf '  %s\n' "${files[@]}"
+          shellcheck "${files[@]}"
+
+  deploy:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        env:
+          DEPLOYER_KEY: ${{ secrets.VPS_DEPLOYER_KEY }}
+          DEPLOYER_HOST: ${{ secrets.VPS_DEPLOYER_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEPLOYER_KEY:-}" ] || [ -z "${DEPLOYER_HOST:-}" ]; then
+            echo "Missing VPS_DEPLOYER_KEY / VPS_DEPLOYER_HOST secrets" >&2
+            exit 1
+          fi
+          echo "::add-mask::$DEPLOYER_HOST"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOYER_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 -H "$DEPLOYER_HOST" 2>/dev/null > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Trigger deploy-observability
+        env:
+          DEPLOYER_USER: ${{ secrets.VPS_DEPLOYER_USER }}
+          DEPLOYER_HOST: ${{ secrets.VPS_DEPLOYER_HOST }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 \
+              -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              "${DEPLOYER_USER}@${DEPLOYER_HOST}" \
+              deploy-observability
+
+      - name: Health check
+        env:
+          DEPLOYER_USER: ${{ secrets.VPS_DEPLOYER_USER }}
+          DEPLOYER_HOST: ${{ secrets.VPS_DEPLOYER_HOST }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 \
+              -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              "${DEPLOYER_USER}@${DEPLOYER_HOST}" \
+              health
+
+  notify:
+    needs: deploy
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Telegram notify
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_CI_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CI_CHAT_ID }}
+          STATUS: ${{ needs.deploy.result }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ] || [ -z "${CHAT:-}" ]; then
+            echo "Telegram secrets not configured — skipping notify."
+            exit 0
+          fi
+          if [ "$STATUS" = "success" ]; then
+            ICON="OK"
+          else
+            ICON="FAIL"
+          fi
+          TRIGGER="${COMMIT_MSG:-$EVENT}"
+          MSG=$(printf '[%s] deploy-observability: %s\n%s\n%s' "$ICON" "$STATUS" "$TRIGGER" "$RUN_URL")
+          curl -fsS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=${MSG}" \
+            > /dev/null
