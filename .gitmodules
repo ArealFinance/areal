@@ -16,3 +16,6 @@
 [submodule "sdk"]
 	path = sdk
 	url = https://github.com/ArealFinance/sdk.git
+[submodule "backend"]
+	path = backend
+	url = https://github.com/ArealFinance/backend.git
