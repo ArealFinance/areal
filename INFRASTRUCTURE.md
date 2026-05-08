@@ -308,7 +308,13 @@ gh secret set VPS_DEPLOYER_HOST --repo ArealFinance/areal --body "<vps-ip>"
 # SSH user (must match --pubkey-file owner on VPS)
 gh secret set VPS_DEPLOYER_USER --repo ArealFinance/areal --body "deployer"
 
-# Private key in PEM format (ed25519 or RSA)
+# Private key in PEM format (ed25519 or RSA).
+# IMPORTANT: use stdin redirect to preserve trailing newline.
+# Do NOT use --body "$(cat ~/.ssh/areal_deployer)" — command substitution
+# strips the trailing newline, which can break OpenSSH key parsing in some
+# Actions runner versions and may also weaken GitHub's secret masking
+# (the masker matches the exact stored bytes; missing newline = unmasked
+# fragments potentially visible in logs).
 gh secret set VPS_DEPLOYER_KEY --repo ArealFinance/areal < ~/.ssh/areal_deployer
 
 # Telegram bot token (from @BotFather)

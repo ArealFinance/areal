@@ -305,10 +305,6 @@ install_sudoers() {
 # Managed by scripts/setup-deployer-user.sh — do not edit by hand.
 # Allow the deployer user to invoke the deploy verb scripts and read service
 # status, all without a password. Nothing else is permitted.
-Defaults!/usr/local/sbin/areal-deploy-observability env_keep += "HEALTH_URL"
-Defaults!/usr/local/sbin/areal-deploy-dashboard     env_keep += "HEALTH_URL"
-Defaults!/usr/local/sbin/areal-deploy-app           env_keep += "HEALTH_URL"
-
 deployer ALL=(root) NOPASSWD: /usr/local/sbin/areal-deploy-observability
 deployer ALL=(root) NOPASSWD: /usr/local/sbin/areal-deploy-dashboard
 deployer ALL=(root) NOPASSWD: /usr/local/sbin/areal-deploy-app

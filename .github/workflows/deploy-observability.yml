@@ -112,11 +112,11 @@ jobs:
             echo "Telegram secrets not configured — skipping notify."
             exit 0
           fi
-          if [ "$STATUS" = "success" ]; then
-            ICON="OK"
-          else
-            ICON="FAIL"
-          fi
+          case "$STATUS" in
+            success) ICON="OK" ;;
+            skipped) ICON="SKIP" ;;
+            *) ICON="FAIL" ;;
+          esac
           TRIGGER="${COMMIT_MSG:-$EVENT}"
           MSG=$(printf '[%s] deploy-observability: %s\n%s\n%s' "$ICON" "$STATUS" "$TRIGGER" "$RUN_URL")
           curl -fsS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
