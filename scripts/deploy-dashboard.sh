@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# !! EMERGENCY MANUAL FALLBACK !!
+# This script is preserved as a manual fallback for cases when GitHub Actions
+# is unavailable. Preferred path: .github/workflows/deploy-dashboard.yml.
+# Do not use this script unless Actions cannot run (e.g., GitHub outage).
+# Keep parity with the workflow if you change one.
+#
 # Build and deploy the admin dashboard.
 #
 # Loads DEPLOY_HOST and DEPLOY_PATH from .env at the repo root (if present).
