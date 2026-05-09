@@ -17,7 +17,9 @@
 #   - Only the final rsync runs as root (it writes into /var/www/, which is
 #     root-owned). Everything before that is dropped privilege.
 #
-# Uses `npm install` (not `npm ci`) — see deploy-app.sh rationale.
+# Uses `npm ci` (multi-platform lockfile lands in sdk#22 + dashboard via app#25
+# regenerate; npm ci does not mutate the lockfile so subsequent submodule
+# checkouts never trip on local working-tree changes). See deploy-app.sh.
 #
 set -euo pipefail
 
@@ -43,11 +45,11 @@ runuser -u "${DEPLOY_USER}" -- bash -c "
 
   # Build SDK first — dashboard consumes file:../sdk and reads its dist/.
   cd '${REPO_ROOT}/sdk'
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
   npm run build
 
   cd '${REPO_ROOT}/dashboard'
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
   npm run build
 "
 

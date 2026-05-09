@@ -13,9 +13,13 @@
 #   - Only the final rsync runs as root (it writes into /var/www/, which is
 #     root-owned). Everything before that is dropped privilege.
 #
-# Uses `npm install` (not `npm ci`) deliberately — npm ci skips OS-specific
-# optional deps when their entries are missing from package-lock.json (npm
-# bug https://github.com/npm/cli/issues/4828); npm install fills them in.
+# Uses `npm ci` (not `npm install`). The lockfile in app/ and sdk/ now lists
+# every platform's optional native bindings as direct entries (regenerated in
+# sdk#22 + app#25, Phase 25 #7), so `npm ci` resolves the Linux x64 binding
+# cleanly. We pick `ci` over `install` because:
+#   - it does NOT mutate package-lock.json — the next submodule checkout never
+#     trips on local working-tree changes; and
+#   - it is faster (no resolution) and deterministic on every run.
 #
 # REPO_ROOT and APP_WEBROOT come from /etc/areal-deploy/config.env (sourced by
 # the wrapper at /usr/local/sbin/areal-deploy-app), with bake-time defaults
@@ -48,11 +52,11 @@ runuser -u "${DEPLOY_USER}" -- bash -c "
 
   # Build SDK first — app consumes file:../sdk and reads its dist/.
   cd '${REPO_ROOT}/sdk'
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
   npm run build
 
   cd '${REPO_ROOT}/app'
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
   npm run build
 "
 
