@@ -1,0 +1,34 @@
+name: deploy-bots
+
+# Phase 25 ships only the skeleton for this workflow. Activation work is owned
+# by Phase 21+:
+#   TODO(Phase 21+): activate push trigger when bots have graceful-restart support
+#   TODO(Phase 21+): wire to areal-deploy `deploy-bots` verb (verb does not exist
+#                    yet — Phase 21 must add it to setup-deployer-user.sh and the
+#                    /usr/local/sbin/areal-deploy-bots verb script)
+#   TODO(Phase 21+): per-bot service restart granularity via input matrix
+#                    (e.g., revenue-crank, yield-claim-crank, pool-rebalancer, …)
+#
+# Until Phase 21+ lands, this workflow is dispatch-only and is a no-op that
+# exists so future automation can land via additive PRs without renaming files.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bot:
+        description: 'Bot service name (or "all")'
+        required: true
+        default: 'all'
+
+permissions:
+  contents: read
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Phase 21+ stub
+        run: |
+          echo "Phase 21+ stub — Phase 25 ships only the skeleton."
+          echo "Selected: ${{ github.event.inputs.bot }}"
+          echo "See plan/integration-plan.md Phase 25 workstream E."
