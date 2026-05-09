@@ -50,17 +50,20 @@ jobs:
               "${DEPLOYER_USER}@${DEPLOYER_HOST}" \
               deploy-app
 
-      - name: Health check
-        env:
-          DEPLOYER_USER: ${{ secrets.VPS_DEPLOYER_USER }}
-          DEPLOYER_HOST: ${{ secrets.VPS_DEPLOYER_HOST }}
+      - name: Health check (app.areal.finance returns 200)
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_ed25519 \
-              -o StrictHostKeyChecking=yes \
-              -o BatchMode=yes \
-              "${DEPLOYER_USER}@${DEPLOYER_HOST}" \
-              health
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://app.areal.finance/)
+            if [ "$code" = "200" ]; then
+              echo "app.areal.finance OK (HTTP $code)"
+              exit 0
+            fi
+            echo "attempt $i: HTTP $code, retry in 6s"
+            sleep 6
+          done
+          echo "app.areal.finance failed health check"
+          exit 1
 
   notify:
     needs: deploy

@@ -1,35 +1,33 @@
 #!/usr/bin/env bash
-# !! EMERGENCY MANUAL FALLBACK !!
-# This script is preserved as a manual fallback for cases when GitHub Actions
-# is unavailable. Preferred path: .github/workflows/deploy-dashboard.yml.
-# Do not use this script unless Actions cannot run (e.g., GitHub outage).
-# Keep parity with the workflow if you change one.
 #
-# Build and deploy the admin dashboard.
+# Production deploy logic for panel.areal.finance.
 #
-# Loads DEPLOY_HOST and DEPLOY_PATH from .env at the repo root (if present).
-# Example .env:
-#   DEPLOY_HOST=your-server.example.com
-#   DEPLOY_PATH=/var/www/panel.areal.finance/
+# Canonical path: GitHub Actions deploy-dashboard.yml SSHes deployer@vps with
+# verb "deploy-dashboard"; that verb is routed by /usr/local/bin/areal-deploy
+# through sudo to /usr/local/sbin/areal-deploy-dashboard, which `git pull`s the
+# meta-repo and execs THIS script. Always runs as root on the VPS.
 #
-# Usage: npm run dashboard:deploy  (or invoke directly)
-
+# Manual fallback: when Actions is unavailable, an operator can run this
+# directly on the VPS as root: `sudo bash /opt/areal/scripts/deploy-dashboard.sh`.
+#
+# Uses `npm install` (not `npm ci`) deliberately — npm ci skips OS-specific
+# optional deps when their entries are missing from package-lock.json (npm
+# bug https://github.com/npm/cli/issues/4828); npm install fills them in.
+#
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+REPO_ROOT="${REPO_ROOT:-/opt/areal}"
+DASHBOARD_WEBROOT="${DASHBOARD_WEBROOT:-/var/www/panel.areal.finance}"
 
-if [ -f .env ]; then
-  # shellcheck disable=SC1091
-  set -a; source .env; set +a
-fi
+cd "${REPO_ROOT}"
+git submodule update --init --recursive
 
-: "${DEPLOY_HOST:?DEPLOY_HOST is not set. Copy .env.example to .env and fill it in.}"
-: "${DEPLOY_PATH:?DEPLOY_PATH is not set. Copy .env.example to .env and fill it in.}"
+# Build SDK first — dashboard consumes file:../sdk and reads its dist/.
+cd "${REPO_ROOT}/sdk"
+npm install --no-audit --no-fund
+npm run build
 
-echo "→ Building dashboard..."
-npm run dashboard:build
-
-echo "→ Uploading to ${DEPLOY_HOST}:${DEPLOY_PATH}"
-rsync -az --delete dashboard/build/ "${DEPLOY_HOST}:${DEPLOY_PATH}"
-
-echo "✓ Deployed."
+cd "${REPO_ROOT}/dashboard"
+npm install --no-audit --no-fund
+npm run build
+rsync -az --delete build/ "${DASHBOARD_WEBROOT}/"
