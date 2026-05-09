@@ -1,0 +1,35 @@
+name: 'SSH setup for deployer@vps'
+description: >-
+  Configure the runner's SSH client to connect to the Areal VPS deployer user.
+  Writes the private key to ~/.ssh/id_ed25519, populates known_hosts via
+  ssh-keyscan, and masks the host secret in logs. Used by deploy-* workflows
+  in the meta-repo so the SSH bootstrap stays DRY across them.
+
+inputs:
+  host:
+    description: 'VPS host (IP or DNS) — typically secrets.VPS_DEPLOYER_HOST'
+    required: true
+  key:
+    description: >-
+      PEM-encoded private key (ed25519 or RSA) — typically
+      secrets.VPS_DEPLOYER_KEY. Must be supplied via stdin redirect when set
+      as a GitHub secret to preserve the trailing newline.
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Configure SSH client
+      shell: bash
+      env:
+        DEPLOYER_HOST: ${{ inputs.host }}
+        DEPLOYER_KEY: ${{ inputs.key }}
+      run: |
+        set -euo pipefail
+        echo "::add-mask::$DEPLOYER_HOST"
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$DEPLOYER_KEY" > ~/.ssh/id_ed25519
+        chmod 600 ~/.ssh/id_ed25519
+        ssh-keyscan -t ed25519 -H "$DEPLOYER_HOST" 2>/dev/null > ~/.ssh/known_hosts
+        chmod 644 ~/.ssh/known_hosts
