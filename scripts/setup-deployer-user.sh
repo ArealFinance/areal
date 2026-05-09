@@ -191,7 +191,7 @@ install_wrapper
 # ---------- 3. verb scripts in /usr/local/sbin ----------
 
 REPO_ROOT="/opt/areal"
-APP_WEBROOT="/var/www/areal.finance"
+APP_WEBROOT="/var/www/app.areal.finance"
 DASHBOARD_WEBROOT="/var/www/panel.areal.finance"
 
 install_verb_app() {
@@ -200,18 +200,19 @@ install_verb_app() {
   cat > "$tmp" <<APP_EOF
 #!/usr/bin/env bash
 #
-# areal-deploy-app — pull meta-repo, update app submodule, build, rsync.
+# areal-deploy-app — thin wrapper that pulls latest meta-repo and execs the
+# canonical deploy script committed in the repo. Logic updates land via git
+# pull on each deploy without re-running setup-deployer-user.sh.
+#
 # Invoked by /usr/local/bin/areal-deploy via NOPASSWD sudo.
 #
 set -euo pipefail
 
 cd "${REPO_ROOT}"
-git pull --recurse-submodules
-git submodule update --remote app
-cd "${REPO_ROOT}/app"
-npm ci
-npm run build
-rsync -az --delete build/ "${APP_WEBROOT}/"
+git pull --ff-only --recurse-submodules
+
+exec /usr/bin/env REPO_ROOT="${REPO_ROOT}" APP_WEBROOT="${APP_WEBROOT}" \\
+  /usr/bin/bash "${REPO_ROOT}/scripts/deploy-app.sh"
 APP_EOF
   install -o root -g root -m 0755 "$tmp" /usr/local/sbin/areal-deploy-app
   rm -f "$tmp"
@@ -223,18 +224,17 @@ install_verb_dashboard() {
   cat > "$tmp" <<DASH_EOF
 #!/usr/bin/env bash
 #
-# areal-deploy-dashboard — pull meta-repo, update dashboard submodule, build, rsync.
+# areal-deploy-dashboard — thin wrapper, see areal-deploy-app for design.
+#
 # Invoked by /usr/local/bin/areal-deploy via NOPASSWD sudo.
 #
 set -euo pipefail
 
 cd "${REPO_ROOT}"
-git pull --recurse-submodules
-git submodule update --remote dashboard
-cd "${REPO_ROOT}/dashboard"
-npm ci
-npm run build
-rsync -az --delete build/ "${DASHBOARD_WEBROOT}/"
+git pull --ff-only --recurse-submodules
+
+exec /usr/bin/env REPO_ROOT="${REPO_ROOT}" DASHBOARD_WEBROOT="${DASHBOARD_WEBROOT}" \\
+  /usr/bin/bash "${REPO_ROOT}/scripts/deploy-dashboard.sh"
 DASH_EOF
   install -o root -g root -m 0755 "$tmp" /usr/local/sbin/areal-deploy-dashboard
   rm -f "$tmp"
