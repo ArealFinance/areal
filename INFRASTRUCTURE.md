@@ -339,6 +339,36 @@ gh secret set TELEGRAM_CI_CHAT_ID --repo ArealFinance/areal --body "<chat-id>"
    For supergroups, the ID is negative and prefixed: `-100123456789`. For channels, it's a plain number or negative without the `100` prefix. Use the full ID including the minus sign.
 8. Save the chat ID as `<chat-id>` in the secret.
 
+#### Telegram privacy and content guarantees
+
+The CI Telegram channel is operationally trusted but not privacy-isolated — any group member sees every notification. The deploy workflows are written so that nothing sensitive ever lands in a Telegram message; this section documents the guarantees and the operator obligations that keep them true.
+
+**What the workflows post to Telegram** (see `.github/workflows/deploy-*.yml` notify job):
+
+- A status icon (`[OK]` / `[SKIP]` / `[FAIL]`).
+- The deploy verb (e.g. `deploy-app`).
+- The job result (`success` / `skipped` / `failure`).
+- The trigger: either the head commit message (push events) or the event name (`workflow_dispatch`, etc.).
+- The GitHub Actions run URL (`https://github.com/ArealFinance/areal/actions/runs/<id>`).
+
+That is the **complete** payload. The notify step intentionally does not interpolate any `secrets.*` value, environment variables that originated from secrets, server hostnames (which are masked via `::add-mask::` in setup-ssh anyway), or build artefact paths.
+
+**Operator obligations:**
+
+- **Keep the bot in privacy mode.** @BotFather's `/setprivacy` defaults to "Enabled" for new bots. Leave it enabled — the bot only needs to send messages, never to read group chatter. If you previously toggled it off (e.g. while debugging the chat-id retrieval), turn it back on after setup.
+- **Treat `TELEGRAM_CI_BOT_TOKEN` as a credential.** If it leaks (committed by mistake, posted in a screenshot), revoke immediately via @BotFather (`/revoke` or `/token`), generate a new token, and re-set the GitHub secret with the new value. The old token can post to your group with anyone's curl until revoked.
+- **Curate group membership.** Only operators with deploy-incident on-call should be in the "Areal CI" group. Don't reuse the production-incident channel — separation prevents alert fatigue and limits the audience for any future content additions.
+- **Never put a stack trace, env dump, or build log in a Telegram message.** If the workflow grows additional notification needs, either drop a link to the GitHub Actions run (already present) or post to a dedicated runbook channel — don't expand the inline payload.
+- **Commit messages are public-channel content.** Anyone authoring a commit on `main` writes a string that lands in the CI channel. If a commit message has to mention a secret-bearing identifier (e.g. an internal ticket number), prefer a generic placeholder; the GitHub Actions URL gives interested operators the full context.
+
+**What goes wrong if you ignore the above:**
+
+- Bot privacy off + bot in another channel → bot can read other channels' chatter, accidentally amplifying surface area for token-misuse incidents.
+- Token leaked + not revoked → anyone with the token can post arbitrary messages to your "Areal CI" group, including phishing-like fake `[OK] deploy-app: success` messages right before a production rollback.
+- Group membership leak → an outside party sees deploy timing/cadence, which can be combined with public chain data to estimate release windows.
+
+None of these are "secret data leak" failures (the token isn't a key into anything sensitive on its own), but each one breaks the assumption that the CI channel is a small, trusted-operator audience.
+
 **4. Validation** (after all secrets are set):
 
 Trigger a manual deploy using GitHub's `workflow_dispatch`:

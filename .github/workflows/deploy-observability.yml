@@ -50,23 +50,12 @@ jobs:
     needs: preflight
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Setup SSH
-        env:
-          DEPLOYER_KEY: ${{ secrets.VPS_DEPLOYER_KEY }}
-          DEPLOYER_HOST: ${{ secrets.VPS_DEPLOYER_HOST }}
-        run: |
-          set -euo pipefail
-          if [ -z "${DEPLOYER_KEY:-}" ] || [ -z "${DEPLOYER_HOST:-}" ]; then
-            echo "Missing VPS_DEPLOYER_KEY / VPS_DEPLOYER_HOST secrets" >&2
-            exit 1
-          fi
-          echo "::add-mask::$DEPLOYER_HOST"
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$DEPLOYER_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -t ed25519 -H "$DEPLOYER_HOST" 2>/dev/null > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
+        uses: ./.github/actions/ssh-setup
+        with:
+          host: ${{ secrets.VPS_DEPLOYER_HOST }}
+          key: ${{ secrets.VPS_DEPLOYER_KEY }}
 
       - name: Trigger deploy-observability
         env:
