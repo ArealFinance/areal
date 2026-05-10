@@ -68,6 +68,21 @@ const MINT_OUT_PATH = arg('mint-out', resolve(REPO_ROOT, 'data', 'sparkles-mint.
 // override that endpoints.ts exposes. Pin explicitly here.
 const USDC_MINT_OVERRIDE = new PublicKey('F9NVj8dFsqxbCfytfmrEWDjdDhmpV1YrjRuxiusGr9Ys');
 
+// DEX dex_config + pool_creators PDAs (single per-cluster, written by the
+// initial bootstrap into init-artifact.json). Hardcoded here so this script
+// doesn't need to read the artifact.
+const DEX_CONFIG_PDA = new PublicKey('CXjqgExZQmxkg9wtW5HSagB3HNKyTedmZNw4hrPc9oTy');
+const POOL_CREATORS_PDA = new PublicKey('8oSJwQz7dubGeiw5h5x3jyWbEed56kvpvnpM5ZgBpBSF');
+
+// Initial SPRK/RWT pool seed — 10_000 of each token at 6 decimals each.
+// Implies a starting price of 1 SPRK = 1 RWT (≈ \$1 → TVL ≈ \$20K through
+// RWT's NAV). The native-dex program hardcodes "one side must be RWT_MINT"
+// (`0x1781 — Neither token is RWT_MINT`), so SPRK/USDC isn't allowed; we
+// pair against RWT and let the markets snapshot pricing chain
+// SPRK→RWT→USDC do the rest.
+const POOL_SEED_AMOUNT_BASE = 10_000n * 1_000_000n;
+const RWT_MINT = new PublicKey('3pBtHBiBwh4agqghTYuDQnZV1po5YahbaBGywtiZooRr');
+
 // ---------------------------------------------------------------------------
 // SPL token program constants
 // ---------------------------------------------------------------------------
@@ -203,6 +218,19 @@ async function ensureMint(
  * Same logic as bootstrap-init.ts::normalizeIdlForArlexClient — kept inline
  * here so this script is standalone.
  */
+/**
+ * Load the native-dex IDL. `create_pool` and `add_liquidity` already have
+ * accurate `isMut` flags in the IDL (different generator output), so no
+ * overrides needed here.
+ */
+async function loadDexIdl(): Promise<any> {
+	const idlPath = resolve(REPO_ROOT, 'sdk', 'idl', 'native-dex.json');
+	if (!existsSync(idlPath)) {
+		throw new Error(`native-dex IDL not found at ${idlPath}`);
+	}
+	return JSON.parse(readFileSync(idlPath, 'utf8'));
+}
+
 async function loadOtIdl(): Promise<unknown> {
 	const idlPath = resolve(REPO_ROOT, 'sdk', 'idl', 'ownership-token.json');
 	if (!existsSync(idlPath)) {
@@ -213,21 +241,25 @@ async function loadOtIdl(): Promise<unknown> {
 	// chain of PDAs in one tx). The IDL drops `mut` annotations for several
 	// of these — pin them all writable here. Static programs & system
 	// program stay readonly.
-	const initWritable = new Set([
-		'deployer',
-		'ot_config',
-		'revenue_account',
-		'revenue_token_account',
-		'revenue_config',
-		'ot_governance',
-		'ot_treasury'
-	]);
+	const writableOverrides: Record<string, Set<string>> = {
+		initialize_ot: new Set([
+			'deployer',
+			'ot_config',
+			'revenue_account',
+			'revenue_token_account',
+			'revenue_config',
+			'ot_governance',
+			'ot_treasury'
+		]),
+		mint_ot: new Set(['ot_config', 'ot_mint', 'recipient_token_account', 'payer'])
+	};
 	for (const ix of idl.instructions ?? []) {
-		if (ix.name !== 'initialize_ot') continue;
+		const overrides = writableOverrides[ix.name];
+		if (!overrides) continue;
 		for (const acc of ix.accounts ?? []) {
 			const writable = acc.writable ?? acc.isMut ?? false;
 			const signer = acc.signer ?? acc.isSigner ?? false;
-			acc.isMut = writable || initWritable.has(acc.name);
+			acc.isMut = writable || overrides.has(acc.name);
 			acc.isSigner = signer;
 		}
 	}
@@ -291,31 +323,67 @@ async function main(): Promise<void> {
 	console.log(`[sparkles] revenue PDA: ${revAcc.toBase58()}`);
 	console.log(`[sparkles] areal_fee_ata: ${arealFeeAta.toBase58()}`);
 
-	// 4. Skip if OtConfig already initialised (idempotent re-runs).
+	// 4. Initialize OT — idempotent (skips if OtConfig PDA exists already).
+	const otIdl = await loadOtIdl();
+	const otClient = new ArlexClient(otIdl, otProgramId, conn);
 	const cfgInfo = await conn.getAccountInfo(otConfig);
 	if (cfgInfo) {
 		console.log(`[sparkles] OtConfig already initialised — skipping initialize_ot`);
-		console.log(`\nMint:    ${otMint.toBase58()}`);
-		console.log(`Symbol:  SPRK`);
-		console.log(`Name:    Sparkles`);
-		return;
+	} else {
+		await initializeOt(conn, otClient, deployer, {
+			otMint,
+			usdcMint,
+			otConfig,
+			revAcc,
+			revTokAcc,
+			revCfg,
+			otGov,
+			otTreas,
+			arealFeeAta
+		});
 	}
 
-	// 5. Initialize OT.
-	const otIdl = await loadOtIdl();
-	const otClient = new ArlexClient(otIdl, otProgramId, conn);
+	// 5. Initial mint — `mint_ot` against the OT program. Authority must
+	//    still be the deployer (R-B authority transfer hasn't run on Testnet
+	//    yet). Mints `INITIAL_SUPPLY` to the deployer's SPRK ATA.
+	await mintInitialSupply(conn, otClient, deployer, otMint, otGov, otConfig);
+
+	// 6. SPRK/USDC liquidity pool — gives the token a price + TVL on the
+	//    /markets list and detail page. Creates a STANDARD constant-product
+	//    pool (RWT-pinned `create_concentrated_pool` rejects non-RWT pairs).
+	await createAndSeedPool(conn, deployer, otMint);
+
+	console.log('\n[sparkles] DONE — Sparkles is live on Testnet.');
+}
+
+async function initializeOt(
+	conn: Connection,
+	otClient: any,
+	deployer: Keypair,
+	pdas: {
+		otMint: PublicKey;
+		usdcMint: PublicKey;
+		otConfig: PublicKey;
+		revAcc: PublicKey;
+		revTokAcc: PublicKey;
+		revCfg: PublicKey;
+		otGov: PublicKey;
+		otTreas: PublicKey;
+		arealFeeAta: PublicKey;
+	}
+): Promise<void> {
 	const tx = otClient.buildTransaction('initialize_ot', {
 		accounts: {
 			deployer: deployer.publicKey,
-			ot_mint: otMint,
-			usdc_mint: usdcMint,
-			ot_config: otConfig,
-			revenue_account: revAcc,
-			revenue_token_account: revTokAcc,
-			revenue_config: revCfg,
-			ot_governance: otGov,
-			ot_treasury: otTreas,
-			areal_fee_destination_account: arealFeeAta,
+			ot_mint: pdas.otMint,
+			usdc_mint: pdas.usdcMint,
+			ot_config: pdas.otConfig,
+			revenue_account: pdas.revAcc,
+			revenue_token_account: pdas.revTokAcc,
+			revenue_config: pdas.revCfg,
+			ot_governance: pdas.otGov,
+			ot_treasury: pdas.otTreas,
+			areal_fee_destination_account: pdas.arealFeeAta,
 			token_program: TOKEN_PROGRAM_ID,
 			system_program: SYSTEM_PROGRAM_ID,
 			ata_program: ASSOCIATED_TOKEN_PROGRAM_ID
@@ -330,12 +398,233 @@ async function main(): Promise<void> {
 
 	const sig = await sendAndConfirm(conn, tx, [deployer]);
 	console.log(`[sparkles] initialize_ot OK — sig ${sig}`);
+}
 
-	console.log(`\nDeployed Sparkles OT:`);
-	console.log(`  Mint:    ${otMint.toBase58()}`);
-	console.log(`  Symbol:  SPRK`);
-	console.log(`  Name:    Sparkles`);
-	console.log(`  OtConfig PDA: ${otConfig.toBase58()}`);
+/**
+ * Mint the initial SPRK supply to the deployer. Mirrors bootstrap-init.ts
+ * `phaseArlMint` but for Sparkles. Skips if the SPRK supply on-chain is
+ * already non-zero (idempotent re-runs).
+ */
+async function mintInitialSupply(
+	conn: Connection,
+	otClient: any,
+	deployer: Keypair,
+	otMint: PublicKey,
+	otGov: PublicKey,
+	otConfig: PublicKey
+): Promise<void> {
+	// Probe current supply via getMint. If non-zero, skip.
+	const mintInfo = await conn.getAccountInfo(otMint);
+	if (mintInfo && mintInfo.data.length >= 36) {
+		// supply is at offset 36-44 (8 bytes LE u64) in the SPL Mint account.
+		const supply = mintInfo.data.readBigUInt64LE(36);
+		if (supply > 0n) {
+			console.log(
+				`[sparkles] supply already ${supply.toString()} (>0) — skipping mint_ot`
+			);
+			return;
+		}
+	}
+
+	const INITIAL_SUPPLY = 1_000_000n * 1_000_000n; // 1_000_000 SPRK with 6 decimals
+	const recipientAta = findAta(deployer.publicKey, otMint);
+
+	const tx = otClient.buildTransaction('mint_ot', {
+		accounts: {
+			authority: deployer.publicKey,
+			ot_governance: otGov,
+			ot_config: otConfig,
+			ot_mint: otMint,
+			recipient_token_account: recipientAta,
+			recipient: deployer.publicKey,
+			payer: deployer.publicKey,
+			token_program: TOKEN_PROGRAM_ID,
+			system_program: SYSTEM_PROGRAM_ID,
+			ata_program: ASSOCIATED_TOKEN_PROGRAM_ID
+		},
+		args: { amount: Number(INITIAL_SUPPLY) }
+	});
+
+	const sig = await sendAndConfirm(conn, tx, [deployer]);
+	console.log(
+		`[sparkles] mint_ot OK — minted 1_000_000 SPRK to ${deployer.publicKey.toBase58()} (sig ${sig})`
+	);
+}
+
+/**
+ * Create a SPRK/USDC standard constant-product pool and seed it with
+ * `POOL_SEED_AMOUNT_BASE` of each token (1:1 → 1 SPRK = 1 USDC starting
+ * price, TVL ≈ \$20K). Idempotent: skips create if the pool PDA already
+ * exists, and skips seeding if vault_a is already non-empty.
+ */
+async function createAndSeedPool(
+	conn: Connection,
+	deployer: Keypair,
+	sprkMint: PublicKey
+): Promise<void> {
+	const dexProgramId = new PublicKey('DEX8LmvJpjefPS1cGS9zWB9ybxN24vNjTTrusBeqyARL');
+	const pairMint = RWT_MINT; // RWT is mandatory side per dex program guard
+
+	// Canonical (mintA < mintB) order required by the DEX program's PDA
+	// derivation. Without this the program will not find the pool state
+	// account at the seed it computes.
+	const [tokenA, tokenB] =
+		sprkMint.toBuffer().compare(pairMint.toBuffer()) < 0
+			? [sprkMint, pairMint]
+			: [pairMint, sprkMint];
+	const [poolPda] = findPda(
+		[Buffer.from('pool'), tokenA.toBuffer(), tokenB.toBuffer()],
+		dexProgramId
+	);
+	console.log(`[sparkles] pool PDA: ${poolPda.toBase58()}`);
+
+	const dexIdl = await loadDexIdl();
+	const dexClient = new ArlexClient(dexIdl, dexProgramId, conn);
+
+	let vaultA: PublicKey;
+	let vaultB: PublicKey;
+	const existingPool = await conn.getAccountInfo(poolPda);
+	if (existingPool) {
+		// Re-read vault addresses from the existing pool state (same offsets
+		// as bootstrap-init's phaseMasterPool — 8 disc + 1 type + 32+32
+		// mints, then vault_a at offset 73, vault_b at 105).
+		vaultA = new PublicKey(existingPool.data.subarray(73, 105));
+		vaultB = new PublicKey(existingPool.data.subarray(105, 137));
+		console.log(
+			`[sparkles] pool already exists — vaultA=${vaultA.toBase58()}, vaultB=${vaultB.toBase58()}`
+		);
+	} else {
+		const vaultAKp = Keypair.generate();
+		const vaultBKp = Keypair.generate();
+		const tx = dexClient.buildTransaction('create_pool', {
+			accounts: {
+				creator: deployer.publicKey,
+				dex_config: DEX_CONFIG_PDA,
+				pool_creators: POOL_CREATORS_PDA,
+				pool_state: poolPda,
+				token_a_mint: tokenA,
+				token_b_mint: tokenB,
+				vault_a: vaultAKp.publicKey,
+				vault_b: vaultBKp.publicKey,
+				token_program: TOKEN_PROGRAM_ID,
+				system_program: SYSTEM_PROGRAM_ID
+			},
+			args: {},
+			computeUnits: 300_000
+		});
+		const sig = await sendAndConfirm(conn, tx, [deployer, vaultAKp, vaultBKp]);
+		vaultA = vaultAKp.publicKey;
+		vaultB = vaultBKp.publicKey;
+		console.log(
+			`[sparkles] create_pool OK — pool=${poolPda.toBase58()}, vaultA=${vaultA.toBase58()}, vaultB=${vaultB.toBase58()} (sig ${sig})`
+		);
+	}
+
+	// Skip seeding if vaults already have liquidity.
+	const vaultABal = await readTokenBalance(conn, vaultA);
+	if (vaultABal > 0n) {
+		console.log(
+			`[sparkles] pool already seeded (vault_a=${vaultABal.toString()}) — skipping add_liquidity`
+		);
+		return;
+	}
+
+	// Provider ATAs. SPRK ATA exists from mint_ot. Deployer's RWT ATA was
+	// created and seeded during bootstrap-init's master-pool phase. If the
+	// RWT side is short, mint RWT into deployer via the RWT vault's
+	// admin_mint_rwt path — but we don't replicate that here. We expect
+	// deployer to hold ≥ POOL_SEED_AMOUNT_BASE RWT from bootstrap; abort
+	// loudly if not.
+	const deployerSprkAta = findAta(deployer.publicKey, sprkMint);
+	const deployerRwtAta = findAta(deployer.publicKey, RWT_MINT);
+	const rwtBal = await readTokenBalance(conn, deployerRwtAta);
+	if (rwtBal < POOL_SEED_AMOUNT_BASE) {
+		throw new Error(
+			`deployer RWT balance ${rwtBal.toString()} < ${POOL_SEED_AMOUNT_BASE.toString()}. ` +
+				`Top up via admin_mint_rwt or rebalance from the master pool.`
+		);
+	}
+
+	const providerTokenA = tokenA.equals(RWT_MINT) ? deployerRwtAta : deployerSprkAta;
+	const providerTokenB = tokenB.equals(RWT_MINT) ? deployerRwtAta : deployerSprkAta;
+	const [lpPosition] = findPda(
+		[Buffer.from('lp'), poolPda.toBuffer(), deployer.publicKey.toBuffer()],
+		dexProgramId
+	);
+
+	const seedTx = dexClient.buildTransaction('add_liquidity', {
+		accounts: {
+			provider: deployer.publicKey,
+			payer: deployer.publicKey,
+			dex_config: DEX_CONFIG_PDA,
+			pool_state: poolPda,
+			lp_position: lpPosition,
+			provider_token_a: providerTokenA,
+			provider_token_b: providerTokenB,
+			vault_a: vaultA,
+			vault_b: vaultB,
+			token_program: TOKEN_PROGRAM_ID,
+			system_program: SYSTEM_PROGRAM_ID
+		},
+		args: {
+			amount_a: Number(POOL_SEED_AMOUNT_BASE),
+			amount_b: Number(POOL_SEED_AMOUNT_BASE),
+			min_shares: 0
+		},
+		computeUnits: 400_000
+	});
+	const sig = await sendAndConfirm(conn, seedTx, [deployer]);
+	console.log(
+		`[sparkles] add_liquidity OK — seeded 10_000 SPRK + 10_000 USDC (sig ${sig})`
+	);
+}
+
+/** Read SPL token-account balance via getTokenAccountBalance. */
+async function readTokenBalance(conn: Connection, ata: PublicKey): Promise<bigint> {
+	try {
+		const r = await conn.getTokenAccountBalance(ata, 'confirmed');
+		return BigInt(r.value.amount);
+	} catch {
+		return 0n;
+	}
+}
+
+/**
+ * Ensure deployer's USDC ATA holds at least `min` lamports. Mints the gap
+ * via SPL `MintTo` (deployer is the USDC mint authority on Testnet).
+ */
+async function ensureUsdcBalance(
+	conn: Connection,
+	deployer: Keypair,
+	ata: PublicKey,
+	usdcMint: PublicKey,
+	min: bigint
+): Promise<void> {
+	const have = await readTokenBalance(conn, ata);
+	if (have >= min) {
+		console.log(`[sparkles] deployer USDC ATA already has ${have.toString()} (≥ ${min.toString()})`);
+		return;
+	}
+	const need = min - have;
+	// SPL Token MintTo (instruction code 7): [mint, dest, authority] writable mint+dest, signer authority.
+	const data = Buffer.alloc(1 + 8);
+	data.writeUInt8(7, 0);
+	data.writeBigUInt64LE(need, 1);
+	const tx = new Transaction().add(
+		new TransactionInstruction({
+			keys: [
+				{ pubkey: usdcMint, isSigner: false, isWritable: true },
+				{ pubkey: ata, isSigner: false, isWritable: true },
+				{ pubkey: deployer.publicKey, isSigner: true, isWritable: false }
+			],
+			programId: TOKEN_PROGRAM_ID,
+			data
+		})
+	);
+	const sig = await sendAndConfirm(conn, tx, [deployer]);
+	console.log(
+		`[sparkles] minted ${need.toString()} USDC (lamports) to deployer ATA (sig ${sig})`
+	);
 }
 
 main().catch((e) => {
