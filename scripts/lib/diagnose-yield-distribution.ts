@@ -81,22 +81,24 @@ async function readAtaBalance(conn: Connection, ata: PublicKey): Promise<bigint 
 }
 
 /**
- * Parse the bits we care about out of MerkleDistributor. Layout per
- * contracts/yield-distribution/src/state.rs (Layer 10 confirmed).
+ * Parse the bits we care about out of MerkleDistributor.
+ *
+ * Layout per `contracts/yield-distribution/src/state.rs` (SIZE = 186,
+ * SPACE = 8 + 186 = 194). All u64 — NOT u128 as I originally assumed.
  * Offsets (within data, AFTER 8-byte arlex discriminator):
- *   0  : ot_mint            [32]
- *   32 : reward_vault       [32]
- *   64 : accumulator        [32]
- *   96 : merkle_root        [32]
- *   128: max_total_claim    u128
- *   144: total_claimed      u128
- *   160: total_funded       u128
- *   176: locked_vested      u128
- *   192: last_fund_ts       i64
- *   200: vesting_period_secs i64
- *   208: epoch              u64
- *   216: is_active          u8
- *   217: bump               u8
+ *   0   : ot_mint            [32]
+ *   32  : reward_vault       [32]
+ *   64  : accumulator        [32]
+ *   96  : merkle_root        [32]
+ *   128 : max_total_claim    u64
+ *   136 : total_claimed      u64
+ *   144 : total_funded       u64
+ *   152 : locked_vested      u64
+ *   160 : last_fund_ts       i64
+ *   168 : vesting_period_secs i64
+ *   176 : epoch              u64
+ *   184 : is_active          u8
+ *   185 : bump               u8
  */
 interface MerkleDistributorView {
 	otMint: PublicKey;
@@ -106,6 +108,7 @@ interface MerkleDistributorView {
 	maxTotalClaim: bigint;
 	totalClaimed: bigint;
 	totalFunded: bigint;
+	lockedVested: bigint;
 	epoch: bigint;
 	lastFundTs: bigint;
 	vestingPeriodSecs: bigint;
@@ -113,21 +116,21 @@ interface MerkleDistributorView {
 }
 
 function parseMerkleDistributor(raw: Buffer): MerkleDistributorView | null {
-	if (raw.length < 8 + 218) return null;
+	if (raw.length < 8 + 186) return null;
 	const data = raw.subarray(8); // skip discriminator
 	return {
 		otMint: new PublicKey(data.subarray(0, 32)),
 		rewardVault: new PublicKey(data.subarray(32, 64)),
 		accumulator: new PublicKey(data.subarray(64, 96)),
 		merkleRoot: data.subarray(96, 128).toString('hex'),
-		maxTotalClaim: data.readBigUInt64LE(128) + (data.readBigUInt64LE(136) << 64n),
-		totalClaimed: data.readBigUInt64LE(144) + (data.readBigUInt64LE(152) << 64n),
-		totalFunded: data.readBigUInt64LE(160) + (data.readBigUInt64LE(168) << 64n),
-		// locked_vested at 176..192 — skipped for brevity.
-		lastFundTs: data.readBigInt64LE(192),
-		vestingPeriodSecs: data.readBigInt64LE(200),
-		epoch: data.readBigUInt64LE(208),
-		isActive: data.readUInt8(216) === 1
+		maxTotalClaim: data.readBigUInt64LE(128),
+		totalClaimed: data.readBigUInt64LE(136),
+		totalFunded: data.readBigUInt64LE(144),
+		lockedVested: data.readBigUInt64LE(152),
+		lastFundTs: data.readBigInt64LE(160),
+		vestingPeriodSecs: data.readBigInt64LE(168),
+		epoch: data.readBigUInt64LE(176),
+		isActive: data.readUInt8(184) === 1
 	};
 }
 
