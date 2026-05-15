@@ -644,17 +644,29 @@ function loadIdl(name: string): MinimalIdl {
  * the IDL emitter is fixed or arlex-client gains a normalization step.
  */
 type AccountFlagOverrides = Record<string, ReadonlyArray<string>>;
-// Canonical mapping derived programmatically from
-// `contracts/<prog>/src/instructions/*.rs` — every `#[account(init, ...)]`
-// annotation that doesn't produce a `writable=true` IDL flag is listed here.
-// Re-audit when contracts change:
-//   for f in contracts/*/src/instructions/*.rs; do ... grep '#[account(' init ... ; done
+// Canonical mapping derived from `contracts/<prog>/src/instructions/*.rs` —
+// every `#[account(init, ...)]` and `#[account(mut, ...)]` annotation whose
+// `writable` flag the IDL emitter dropped (typically when the attribute
+// block spans multiple lines or includes `seeds = [...]`).
+//
+// admin_mint_rwt and similar `mut`-annotated PDAs that the IDL marks as
+// readonly are listed too — see `data/admin-mint-rwt.ts` for the original
+// audit + workaround pattern.
 const INIT_WRITABLE_OVERRIDES: AccountFlagOverrides = {
+  // native-dex
   initialize_dex: ['dex_config', 'pool_creators'],
   initialize_nexus: ['liquidity_nexus'],
+  // rwt-engine
   initialize_vault: ['rwt_vault', 'dist_config'],
+  admin_mint_rwt: ['rwt_vault'],
+  // yield-distribution
   initialize_config: ['config'],
   initialize_liquidity_holding: ['liquidity_holding'],
+  // ownership-token
+  initialize_ot: ['ot_config', 'revenue_account', 'revenue_config', 'ot_governance', 'ot_treasury'],
+  mint_ot: ['ot_config'],
+  // futarchy
+  initialize_futarchy: ['config'],
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

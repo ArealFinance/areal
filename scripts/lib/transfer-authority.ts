@@ -68,9 +68,7 @@ import {
   Transaction,
   TransactionInstruction,
 } from '@solana/web3.js';
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — local ESM with .d.mts sibling, resolves at runtime via tsx.
-import { ArlexClient } from '../../dashboard/src/lib/arlex-client/index.mjs';
+import { ArlexClient } from '@arlex/client';
 
 // SD-31: shared single-source-of-truth import via bots/shared/ relative path.
 import {
@@ -273,13 +271,13 @@ interface MinimalIdl {
 }
 
 function loadIdl(name: string): MinimalIdl {
-  const path = join(REPO_ROOT, 'dashboard', 'src', 'lib', 'idl', `${name}.json`);
+  const path = join(REPO_ROOT, 'sdk', 'idl', `${name}.json`);
   return JSON.parse(readFileSync(path, 'utf8')) as MinimalIdl;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function loadIdlForClient(name: string): any {
-  const path = join(REPO_ROOT, 'dashboard', 'src', 'lib', 'idl', `${name}.json`);
+  const path = join(REPO_ROOT, 'sdk', 'idl', `${name}.json`);
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
