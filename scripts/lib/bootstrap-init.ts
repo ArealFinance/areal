@@ -652,21 +652,51 @@ type AccountFlagOverrides = Record<string, ReadonlyArray<string>>;
 // admin_mint_rwt and similar `mut`-annotated PDAs that the IDL marks as
 // readonly are listed too — see `data/admin-mint-rwt.ts` for the original
 // audit + workaround pattern.
+// Programmatic audit (Phase 25, 2026-05-15): every `#[derive(Accounts)]`
+// struct in `contracts/<prog>/src/instructions/*.rs` was diffed against its
+// matching `sdk/idl/<prog>.json` instruction. Any account whose source has
+// `init` / `init_if_needed` / `mut` / `close` but whose IDL has
+// `isMut: false` is patched below. Account names are unique per IDL even
+// when the instruction name collides across contracts (e.g.
+// `propose_authority_transfer` exists in all 5 contracts but uses different
+// PDA names), so a merged value-set is safe — `normalizeIdlForArlexClient`
+// only flips bits for names actually present in each IDL's instruction.
 const INIT_WRITABLE_OVERRIDES: AccountFlagOverrides = {
   // native-dex
   initialize_dex: ['dex_config', 'pool_creators'],
+  update_dex_config: ['dex_config'],
+  update_areal_fee_destination: ['dex_config'],
+  update_pool_creators: ['pool_creators'],
   initialize_nexus: ['liquidity_nexus'],
+  update_nexus_manager: ['liquidity_nexus'],
   // rwt-engine
   initialize_vault: ['rwt_vault', 'dist_config'],
   admin_mint_rwt: ['rwt_vault'],
+  adjust_capital: ['rwt_vault'],
+  update_vault_manager: ['rwt_vault'],
   // yield-distribution
   initialize_config: ['config'],
   initialize_liquidity_holding: ['liquidity_holding'],
+  create_distributor: ['distributor', 'accumulator'],
+  fund_distributor: ['distributor'],
+  publish_root: ['distributor'],
+  claim: ['distributor', 'claim_status'],
+  close_distributor: ['distributor'],
+  update_config: ['config'],
+  update_publish_authority: ['config'],
   // ownership-token
   initialize_ot: ['ot_config', 'revenue_account', 'revenue_config', 'ot_governance', 'ot_treasury'],
   mint_ot: ['ot_config'],
+  distribute_revenue: ['revenue_account'],
+  batch_update_destinations: ['revenue_config'],
   // futarchy
   initialize_futarchy: ['config'],
+  create_proposal: ['config'],
+  // cross-contract — `propose_authority_transfer` exists in all 5 contracts,
+  // `accept_authority_transfer` only loses its `mut` bit on ownership-token's
+  // ot_governance; account-name uniqueness across IDLs makes the merge safe.
+  propose_authority_transfer: ['dex_config', 'rwt_vault', 'config', 'ot_governance'],
+  accept_authority_transfer: ['ot_governance'],
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
