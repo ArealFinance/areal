@@ -316,6 +316,44 @@ async function getTokenBalance(conn: Connection, ata: PublicKey): Promise<bigint
   return info.data.readBigUInt64LE(64);
 }
 
+/**
+ * Read the SPL Mint account and return its current `mint_authority`.
+ *
+ * SPL Mint layout (relevant prefix):
+ *   0..4   COption tag for mint_authority (u32 LE; 1 = Some, 0 = None)
+ *   4..36  mint_authority pubkey (32 bytes)
+ *  36..44  supply (u64 LE)
+ *  44      decimals (u8)
+ *  45      is_initialized (u8)
+ *  46..50  COption tag for freeze_authority
+ *  ...
+ *
+ * Returns `null` when the COption tag is `None` (authority disabled). Throws
+ * if the account doesn't exist or is smaller than 82 bytes.
+ */
+async function readMintAuthority(
+  conn: Connection,
+  mint: PublicKey,
+): Promise<PublicKey | null> {
+  const info = await conn.getAccountInfo(mint, 'confirmed');
+  if (!info) {
+    throw new Error(`mint account not found: ${mint.toBase58()}`);
+  }
+  if (info.data.length < 82) {
+    throw new Error(
+      `mint account too small (${info.data.length} < 82 bytes): ${mint.toBase58()}`,
+    );
+  }
+  const tag = info.data.readUInt32LE(0);
+  if (tag === 0) return null;
+  if (tag !== 1) {
+    throw new Error(
+      `unexpected COption tag (${tag}) for mint_authority on ${mint.toBase58()}`,
+    );
+  }
+  return new PublicKey(info.data.subarray(4, 36));
+}
+
 async function fetchAndParsePool(conn: Connection, pool: PublicKey) {
   const info = await conn.getAccountInfo(pool, 'confirmed');
   if (!info) throw new Error(`pool not found: ${pool.toBase58()}`);
@@ -476,6 +514,83 @@ async function runSmoke(
 // User setup — fresh keypair, airdrop, ATAs, fund tokens
 // --------------------------------------------------------------------------
 
+type FundMethod = 'mint' | 'transfer' | 'skipped';
+
+interface FundResult {
+  funded: bigint;
+  method: FundMethod;
+}
+
+/**
+ * Fund a user ATA with `amount` of `mint`, picking the strategy dynamically:
+ *
+ *   - If the on-chain `mint_authority` equals the deployer pubkey, emit
+ *     SPL MintTo signed by the deployer.
+ *   - Otherwise, the authority is a PDA (e.g. OT::OtConfig, RWT::rwt_vault)
+ *     and we cannot mint with a plain keypair signer. Fall back to SPL
+ *     Transfer from deployer's pre-seeded ATA. If the deployer doesn't hold
+ *     enough, warn and skip (the smoke that needs this token will then skip
+ *     gracefully on its own balance preflight).
+ *
+ * Why dynamic: post-`initialize_ot` the OT mint authority is transferred from
+ * deployer to the `OtConfig` PDA, so any direct `MintTo` returns SPL error
+ * 0x4 (`OwnerMismatch`). USDC test mint stays on deployer. RWT is vault-PDA.
+ * Reading the authority off-chain is the robust path — it survives any future
+ * change to bootstrap (e.g. transferring USDC authority too).
+ */
+async function fundUserToken(
+  conn: Connection,
+  deployer: Keypair,
+  mint: PublicKey,
+  userAta: PublicKey,
+  amount: bigint,
+  label: string,
+): Promise<FundResult> {
+  const authority = await readMintAuthority(conn, mint);
+
+  if (authority !== null && authority.equals(deployer.publicKey)) {
+    const tx = new Transaction().add(
+      mintToIx(mint, userAta, deployer.publicKey, amount),
+    );
+    await sendAndConfirm(conn, tx, [deployer]);
+    info(`  funded user ${label} ATA with ${amount} via MintTo (authority=deployer)`);
+    return { funded: amount, method: 'mint' };
+  }
+
+  // Authority is a PDA (or None) — fall back to Transfer from deployer ATA.
+  const deployerAta = findAta(deployer.publicKey, mint);
+  const balance = await getTokenBalance(conn, deployerAta);
+  if (balance < amount) {
+    warn(
+      `deployer ${label} balance (${balance}) < requested ${amount} — ` +
+        `funding partial/skipped (authority=${authority?.toBase58() ?? 'NONE'})`,
+    );
+    if (balance === 0n) {
+      return { funded: 0n, method: 'skipped' };
+    }
+    // Transfer whatever's available so dependent smokes can still partially run.
+    const partialTx = new Transaction().add(
+      transferIx(deployerAta, userAta, deployer.publicKey, balance),
+    );
+    await sendAndConfirm(conn, partialTx, [deployer]);
+    info(
+      `  funded user ${label} ATA with ${balance} (partial) via Transfer ` +
+        `(authority=${authority?.toBase58() ?? 'NONE'})`,
+    );
+    return { funded: balance, method: 'transfer' };
+  }
+
+  const tx = new Transaction().add(
+    transferIx(deployerAta, userAta, deployer.publicKey, amount),
+  );
+  await sendAndConfirm(conn, tx, [deployer]);
+  info(
+    `  funded user ${label} ATA with ${amount} via Transfer ` +
+      `(authority=${authority?.toBase58() ?? 'NONE'})`,
+  );
+  return { funded: amount, method: 'transfer' };
+}
+
 async function setupUser(ctx: SmokeContext): Promise<void> {
   const { conn, user, deployer, art } = ctx;
   info(`\n=== User setup ===`);
@@ -502,43 +617,20 @@ async function setupUser(ctx: SmokeContext): Promise<void> {
   await sendAndConfirm(conn, tx, [deployer]);
   info(`  created ATAs (OT, RWT, USDC) for user`);
 
-  // Fund OT — mint authority is deployer (set in phaseArlOtMint).
+  // Fund each token via the dynamic strategy. Per bootstrap (2026-05-17):
+  //   - OT  : authority transferred to OtConfig PDA in initialize_ot   → Transfer
+  //   - USDC: authority stays on deployer (ensureMint sets it)          → MintTo
+  //   - RWT : authority is rwt_vault PDA (initialize_vault sets it)    → Transfer
+  // fundUserToken() resolves this dynamically so the script stays correct
+  // even if bootstrap evolves.
   const userOtAta = findAta(user.publicKey, otMint);
-  const otTx = new Transaction().add(
-    mintToIx(otMint, userOtAta, deployer.publicKey, 100_000_000n), // 100 OT
-  );
-  await sendAndConfirm(conn, otTx, [deployer]);
-  info(`  funded user OT ATA with 100 OT`);
+  await fundUserToken(conn, deployer, otMint, userOtAta, 100_000_000n, 'OT'); // 100 OT
 
-  // Fund USDC — mint authority is deployer.
   const userUsdcAta = findAta(user.publicKey, usdcMint);
-  const usdcTx = new Transaction().add(
-    mintToIx(usdcMint, userUsdcAta, deployer.publicKey, 1_000_000_000n), // 1000 USDC
-  );
-  await sendAndConfirm(conn, usdcTx, [deployer]);
-  info(`  funded user USDC ATA with 1000 USDC`);
+  await fundUserToken(conn, deployer, usdcMint, userUsdcAta, 1_000_000_000n, 'USDC'); // 1000 USDC
 
-  // Fund RWT — RWT mint authority is the rwt_vault PDA. We can't directly
-  // MintTo with deployer signature. Workaround: transfer from deployer's
-  // pre-seeded RWT ATA (admin_mint_rwt was called in phaseArlRwtPool).
   const userRwtAta = findAta(user.publicKey, rwtMint);
-  const deployerRwtAta = findAta(deployer.publicKey, rwtMint);
-  const deployerRwtBal = await getTokenBalance(conn, deployerRwtAta);
-  if (deployerRwtBal < 100_000_000n) {
-    warn(
-      `deployer RWT balance (${deployerRwtBal}) < 100 RWT; user RWT funding may be partial`,
-    );
-  }
-  const toTransfer = deployerRwtBal < 100_000_000n ? deployerRwtBal : 100_000_000n;
-  if (toTransfer > 0n) {
-    const rwtTx = new Transaction().add(
-      transferIx(deployerRwtAta, userRwtAta, deployer.publicKey, toTransfer),
-    );
-    await sendAndConfirm(conn, rwtTx, [deployer]);
-    info(`  funded user RWT ATA with ${toTransfer} (transfer from deployer)`);
-  } else {
-    warn(`deployer has 0 RWT — user RWT ATA stays at 0; RWT-side smokes will skip`);
-  }
+  await fundUserToken(conn, deployer, rwtMint, userRwtAta, 100_000_000n, 'RWT'); // 100 RWT
 }
 
 // --------------------------------------------------------------------------
