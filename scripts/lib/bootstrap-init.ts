@@ -669,6 +669,13 @@ const INIT_WRITABLE_OVERRIDES: AccountFlagOverrides = {
   update_pool_creators: ['pool_creators'],
   initialize_nexus: ['liquidity_nexus'],
   update_nexus_manager: ['liquidity_nexus'],
+  // CP-7 Monotonic Ladder rebalancer ix (SDK 0.12.0 / contracts f4d393e).
+  // pool_state + bin_array are `mut`; grow_liquidity additionally mutates
+  // the Nexus PDA + Nexus USDC ATA + pool's USDC vault for the PDA-signed
+  // SPL Transfer that funds the active-zone extension. compress_liquidity
+  // is capital-neutral so only the pool state + bin array carry `mut`.
+  grow_liquidity: ['pool_state', 'bin_array', 'liquidity_nexus', 'nexus_usdc_ata', 'pool_vault_b'],
+  compress_liquidity: ['pool_state', 'bin_array'],
   // rwt-engine
   initialize_vault: ['rwt_vault', 'dist_config'],
   admin_mint_rwt: ['rwt_vault'],
@@ -1207,6 +1214,11 @@ const ARL_INITIAL_SUPPLY: bigint = parseSeedAmount(
 // covers bins -35..+34 around the initial price.
 const MASTER_POOL_BIN_STEP_BPS = 10;
 const MASTER_POOL_INITIAL_ACTIVE_BIN = 0;
+// CP-4 (contracts f4d393e) — required 3rd arg for create_concentrated_pool.
+// 100 bps = NAV − 1% places the permanent tail floor 10 bins below the
+// initial active bin (with bin_step_bps=10) — the documented default.
+// Minimum floor enforced on-chain is MIN_PERMANENT_TAIL_OFFSET_BPS = 30.
+const MASTER_POOL_PERMANENT_TAIL_OFFSET_BPS = 100;
 
 async function phaseMasterPool(
   conn: Connection,
@@ -1305,6 +1317,7 @@ async function phaseMasterPool(
       args: {
         bin_step_bps: MASTER_POOL_BIN_STEP_BPS,
         initial_active_bin: MASTER_POOL_INITIAL_ACTIVE_BIN,
+        permanent_tail_offset_bps: MASTER_POOL_PERMANENT_TAIL_OFFSET_BPS,
       },
       computeUnits: 300_000,
     });
