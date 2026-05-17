@@ -20,6 +20,11 @@
 #   8. Run all 6 Layer 10 scenarios with SCENARIO_<N>_INLINE_EXEC=1 (§6.5
 #      E2E full-flow). Chain-state verification only — no TX submission.
 #      Best-effort: scenario-level skips on missing pre-flight gates.
+#   9. Run scripts/smoke-swap.ts — 4 REAL swap transactions against the
+#      live programs (StandardCurve OT↔RWT both directions + master pool
+#      USDC→RWT mint-route + RWT→USDC bin-walk). Default ON, --no-smoke
+#      to skip. Closes the gap left by step 8 which only verifies chain
+#      state.
 #
 # Exit code carries from the first failing step. Tee-logs to
 # data/layer-10-fresh-deploy.log.
@@ -30,6 +35,8 @@
 #                   file at data/e2e-bootstrap.secrets.json already holds
 #                   RWT/USDC keypairs, stage_pregen_keypairs reuses them
 #                   (so a warm-restart preserves on-chain state).
+#   --no-smoke      skip step 9 (smoke-swap real-tx test). Useful for CI
+#                   passes that only need chain-state verification.
 
 set -euo pipefail
 umask 077
@@ -43,11 +50,13 @@ LOG_FILE="$DATA_DIR/layer-10-fresh-deploy.log"
 mkdir -p "$DATA_DIR"
 
 KEEP_LEDGER=0
+SKIP_SMOKE=0
 for arg in "$@"; do
   case "$arg" in
     --keep-ledger) KEEP_LEDGER=1 ;;
+    --no-smoke) SKIP_SMOKE=1 ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,25p' "$0"
       exit 0
       ;;
     *)
@@ -268,8 +277,28 @@ run_scenarios_inline() {
   return 0
 }
 
+run_smoke_swap() {
+  if (( SKIP_SMOKE )); then
+    log "step 9: smoke-swap skipped (--no-smoke)"
+    return 0
+  fi
+  log "step 9: running scripts/smoke-swap.ts (real swap transactions)"
+  local tsx_bin="$ROOT_DIR/bots/node_modules/.bin/tsx"
+  if [[ ! -x "$tsx_bin" ]]; then
+    tsx_bin="tsx"
+  fi
+  # Same NODE_PATH wiring as run_e2e so @areal/sdk + @solana/web3.js
+  # resolve from the bots workspace install.
+  if ( cd "$ROOT_DIR" && NODE_PATH="$ROOT_DIR/bots/node_modules" "$tsx_bin" "$SCRIPT_DIR/smoke-swap.ts" ); then
+    log "step 9: smoke-swap GREEN"
+  else
+    log "step 9: smoke-swap FAILED"
+    return 1
+  fi
+}
+
 main() {
-  log "Layer 10 fresh-deploy starting (keep-ledger=$KEEP_LEDGER)"
+  log "Layer 10 fresh-deploy starting (keep-ledger=$KEEP_LEDGER, skip-smoke=$SKIP_SMOKE)"
   cleanup_validator
   wipe_ledger
   start_validator
@@ -279,7 +308,8 @@ main() {
   run_audit
   run_cu_profile
   run_scenarios_inline
-  log "Layer 10 fresh-deploy complete — all 8 steps green"
+  run_smoke_swap
+  log "Layer 10 fresh-deploy complete — all 9 steps green"
 }
 
 main
