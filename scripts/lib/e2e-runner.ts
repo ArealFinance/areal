@@ -19,7 +19,7 @@
  *   scenario-1    — Happy Path (mint_rwt + admin_mint + revenue→yield→claim)
  *   scenario-2    — Governance (Futarchy proposal lifecycle)
  *   scenario-3    — DEX Standard (LP/swap/zap/remove + OT-pair fee)
- *   scenario-4    — Concentrated (bin walk + shift_liquidity + conservation)
+ *   scenario-4    — Concentrated (Monotonic Ladder: grow/compress/swap/mint-route)
  *   scenario-5    — Nexus 14-step (deposit + swap + add LP + withdraw_profits)
  *   scenario-6    — Emergency / Authority Closure (10 surfaces + R-G assertion)
  *   all           — Master orchestrator runs S1..S6 in sequence (D35)
