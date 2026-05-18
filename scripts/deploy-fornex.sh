@@ -446,7 +446,12 @@ bootstrap_pools() {
   # --skip-build); no need to re-run cargo build-sbf inside e2e-bootstrap.sh.
   # BOOTSTRAP_TARGET=localhost satisfies the safety gate (validator is local
   # to the VPS — devnet/mainnet are forbidden there).
-  remote "cd $VPS_REPO_ROOT && KEEP_LEDGER=1 SKIP_BUILD=1 BOOTSTRAP_TARGET=localhost bash scripts/e2e-bootstrap.sh"
+  # `solana` CLI lives at /root/.local/share/solana/install/active_release/bin
+  # on VPS, NOT in the default non-login SSH PATH. Prepend it so
+  # e2e-bootstrap.sh's preflight `command -v solana` check passes.
+  local vps_solana_dir
+  vps_solana_dir="$(dirname "$VPS_SOLANA_BIN")"
+  remote "cd $VPS_REPO_ROOT && PATH=$vps_solana_dir:\$PATH KEEP_LEDGER=1 SKIP_BUILD=1 BOOTSTRAP_TARGET=localhost bash scripts/e2e-bootstrap.sh"
 }
 
 # ----------------------------------------------------------------------------
