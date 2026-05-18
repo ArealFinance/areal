@@ -1580,6 +1580,13 @@ async function phaseMasterPool(
           conn,
         );
         const need = MASTER_POOL_SEED_RWT - rwtBal;
+        // INVARIANT (NAV = $1.0): `admin_mint_rwt` adds `rwt_amount` to
+        // `total_rwt_supply` and `backing_capital_usd` to
+        // `total_invested_capital`. NAV = capital * NAV_SCALE / supply.
+        // Both args use 6-decimal raw units (USDC + RWT both have 6 decimals),
+        // so passing the same value keeps NAV at the bootstrap target $1.0.
+        // See docs/economics/rwt-real-world-token.mdx and
+        // contracts/rwt-engine/src/nav.rs::calculate_nav.
         const adminTx = rwtClient.buildTransaction('admin_mint_rwt', {
           accounts: {
             authority: deployer.publicKey,
@@ -1596,7 +1603,7 @@ async function phaseMasterPool(
         await sendAndConfirm(conn, adminTx, [deployer]);
         log(
           'phase-f',
-          `admin_mint_rwt: minted ${need.toString()} RWT to deployer ATA`,
+          `admin_mint_rwt: minted ${need.toString()} RWT + ${need.toString()} raw USDC capital (NAV=$1.0)`,
         );
       } catch (e: unknown) {
         // Non-fatal: smoke-swap will surface as RWT-funding skip downstream.
@@ -2676,6 +2683,10 @@ async function phaseSprkRwtPool(
           conn,
         );
         const need = SPRK_RWT_POOL_SEED_RWT - rwtBal;
+        // INVARIANT (NAV = $1.0): mirror `rwt_amount` and
+        // `backing_capital_usd`. Both args are 6-decimal raw (USDC + RWT
+        // share decimals), so equal values preserve NAV = capital / supply
+        // at $1.0. Same reasoning as the master-pool seed in phase-f above.
         const adminTx = rwtClient.buildTransaction('admin_mint_rwt', {
           accounts: {
             authority: deployer.publicKey,
@@ -2690,7 +2701,10 @@ async function phaseSprkRwtPool(
           },
         });
         await sendAndConfirm(conn, adminTx, [deployer]);
-        log('phase-l', `admin_mint_rwt: minted ${need.toString()} RWT for SPRK/RWT pool seed`);
+        log(
+          'phase-l',
+          `admin_mint_rwt: minted ${need.toString()} RWT + ${need.toString()} raw USDC capital for SPRK/RWT pool seed (NAV=$1.0)`,
+        );
       } catch (e: unknown) {
         warn(
           'phase-l',
@@ -3096,6 +3110,138 @@ async function verifyNexusManager(
 }
 
 // --------------------------------------------------------------------------
+// RWT vault state reader + NAV invariant check
+// --------------------------------------------------------------------------
+
+/**
+ * On-chain `RwtVault` snapshot fields needed for the NAV invariant check.
+ *
+ * Layout (from contracts/rwt-engine/src/state.rs, repr(C, packed) + 8-byte
+ * Arlex discriminator prefix):
+ *   bytes  0..8   : account discriminator
+ *   bytes  8..24  : total_invested_capital (u128, little-endian)
+ *   bytes 24..32  : total_rwt_supply (u64, little-endian)
+ *   bytes 32..40  : nav_book_value (u64, little-endian)
+ *   bytes 40..    : ATAs / authorities / flags (not needed here)
+ */
+interface RwtVaultSnapshot {
+  totalInvestedCapital: bigint;
+  totalRwtSupply: bigint;
+  navBookValue: bigint;
+}
+
+/**
+ * Read the singleton RwtVault account and decode the three NAV-relevant
+ * fields. Returns `null` if the account is missing (vault not yet
+ * initialized — caller should treat as "skip the check").
+ */
+async function readRwtVaultSnapshot(
+  conn: Connection,
+  vaultPda: PublicKey,
+): Promise<RwtVaultSnapshot | null> {
+  const info = await conn.getAccountInfo(vaultPda, 'confirmed');
+  if (!info) return null;
+  const buf = Buffer.from(info.data);
+  if (buf.length < 40) {
+    throw new Error(
+      `rwt_vault account too small: ${buf.length} bytes (want >= 40)`,
+    );
+  }
+  // u128 LE: low u64 (bytes 8..16) + high u64 (bytes 16..24) << 64.
+  const lo = buf.readBigUInt64LE(8);
+  const hi = buf.readBigUInt64LE(16);
+  const totalInvestedCapital = lo + (hi << 64n);
+  const totalRwtSupply = buf.readBigUInt64LE(24);
+  const navBookValue = buf.readBigUInt64LE(32);
+  return { totalInvestedCapital, totalRwtSupply, navBookValue };
+}
+
+// 6-decimal NAV scale, matches contracts/rwt-engine/src/constants.rs::NAV_SCALE.
+// NAV = total_invested_capital * NAV_SCALE / total_rwt_supply.
+const NAV_SCALE = 1_000_000n;
+// $1.00 expressed in raw NAV (6 decimals).
+const INITIAL_NAV = NAV_SCALE;
+// Tolerance for the post-bootstrap NAV check. Bootstrap uses equal raw amounts
+// for `rwt_amount` + `backing_capital_usd`, so NAV should land exactly on
+// $1.0; a smoke `mint_rwt` between bootstrap phases (none currently, but
+// defensive) could shift it by a few raw units. ±0.5% is well below any
+// real-world drift but catches the "10000x off" bug the invariant was added
+// to detect.
+const NAV_TOLERANCE_BPS = 50n;
+
+/**
+ * Post-bootstrap NAV invariant check.
+ *
+ * Asserts NAV ≈ $1.00 after the init phases complete. Catches the
+ * "admin_mint_rwt without matching backing_capital_usd" regression where
+ * `total_rwt_supply` grows but `total_invested_capital` does not, dropping
+ * per-token NAV to a tiny fraction of $1.
+ *
+ * Skipped (warning, not error) if the vault account is missing — that means
+ * `phaseRwtVault` itself was skipped (e.g. IDL missing `initialize_vault`),
+ * and the warning surfaces in the same list as other init skips.
+ */
+async function phaseAssertNavInvariant(
+  conn: Connection,
+  art: Artifact,
+): Promise<void> {
+  if (!art.pdas?.rwt_vault) {
+    warn('phase-z', 'rwt_vault PDA missing from artifact; skipping NAV check');
+    return;
+  }
+  const vaultPda = new PublicKey(art.pdas.rwt_vault);
+  const snap = await readRwtVaultSnapshot(conn, vaultPda);
+  if (!snap) {
+    warn(
+      'phase-z',
+      `rwt_vault account not found at ${vaultPda.toBase58()}; skipping NAV check`,
+    );
+    return;
+  }
+
+  // Zero-supply case: NAV is $1.0 by short-circuit in `calculate_nav`. No
+  // capital mints happened — nothing to check beyond reporting state.
+  if (snap.totalRwtSupply === 0n) {
+    log(
+      'phase-z',
+      `NAV check: supply=0 → NAV = $1.00 by zero-supply short-circuit (capital=${snap.totalInvestedCapital.toString()})`,
+    );
+    return;
+  }
+
+  // Compute NAV the same way the contract does. We do this in BigInt to
+  // mirror the on-chain u128 arithmetic exactly — no float drift.
+  const navComputed =
+    (snap.totalInvestedCapital * NAV_SCALE) / BigInt(snap.totalRwtSupply);
+  const lower = INITIAL_NAV - (INITIAL_NAV * NAV_TOLERANCE_BPS) / 10_000n;
+  const upper = INITIAL_NAV + (INITIAL_NAV * NAV_TOLERANCE_BPS) / 10_000n;
+
+  const navDollars = (Number(navComputed) / Number(NAV_SCALE)).toFixed(6);
+  const supplyDecimal = (Number(snap.totalRwtSupply) / Number(NAV_SCALE)).toFixed(6);
+  const capitalDecimal = (
+    Number(snap.totalInvestedCapital) / Number(NAV_SCALE)
+  ).toFixed(6);
+
+  if (navComputed < lower || navComputed > upper) {
+    throw new Error(
+      `NAV invariant violated: NAV = ${navDollars} USDC (raw ${navComputed.toString()}) ` +
+        `is outside ±${NAV_TOLERANCE_BPS.toString()} bps of $1.00. ` +
+        `supply=${supplyDecimal} RWT (raw ${snap.totalRwtSupply.toString()}), ` +
+        `capital=${capitalDecimal} USDC (raw ${snap.totalInvestedCapital.toString()}). ` +
+        `Bootstrap must pair every admin_mint_rwt(rwt_amount=N) with ` +
+        `backing_capital_usd=N to preserve NAV=$1.0. ` +
+        `See docs/economics/rwt-real-world-token.mdx.`,
+    );
+  }
+
+  log(
+    'phase-z',
+    `NAV invariant OK: NAV = ${navDollars} USDC ` +
+      `(supply=${supplyDecimal} RWT, capital=${capitalDecimal} USDC, nav_book=${snap.navBookValue.toString()})`,
+  );
+}
+
+// --------------------------------------------------------------------------
 // Argv parsing
 // --------------------------------------------------------------------------
 
@@ -3212,6 +3358,13 @@ async function main(): Promise<void> {
   // authority handover, otherwise mint_ot fails with `has_one = authority`
   // and SPRK initial supply is permanently unmintable.
   // ============================================================================
+
+  // Post-bootstrap RWT NAV invariant check. Catches regressions where
+  // `admin_mint_rwt(rwt_amount=N)` is called without a matching
+  // `backing_capital_usd=N`, leaving per-token NAV << $1.0 and inverting
+  // the frontend's RWT economics. Runs after every init phase so it sees
+  // the final supply/capital state from both phase-f and phase-l mints.
+  await phaseAssertNavInvariant(conn, art);
 
   art.init_completed_at = new Date().toISOString();
   saveArtifact(argv.artifact, art);
