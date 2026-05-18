@@ -484,6 +484,18 @@ interface SmokeContext {
   secrets: Secrets;
   dexProgramId: PublicKey;
   rwtEngineProgramId: PublicKey;
+  /**
+   * RWT-denominated protocol fee ATA (== `DexConfig.areal_fee_destination`).
+   *
+   * Resolved at startup from the on-chain DexConfig rather than from
+   * `art.pdas.areal_fee_ata` (which is the USDC ATA — OT's revenue surface,
+   * per docs/contracts/native-dex.mdx §71 "all fees in RWT"). The DEX
+   * `swap` / `zap_liquidity` paths require the passed `areal_fee_account` to
+   * (a) equal the stored destination AND (b) have mint == RWT_MINT
+   * (contracts/native-dex/src/instructions/swap.rs:157 + :198), so the
+   * authoritative value lives on-chain in DexConfig.
+   */
+  arealFeeAccount: PublicKey;
   results: SmokeResult[];
   keepGoing: boolean;
 }
@@ -657,7 +669,9 @@ async function smokeStandardCurve(
   const vaultA = new PublicKey(art.pdas.arl_rwt_pool_vault_a);
   const vaultB = new PublicKey(art.pdas.arl_rwt_pool_vault_b);
   const dexConfig = new PublicKey(art.pdas.dex_config);
-  const arealFeeAta = new PublicKey(art.pdas.areal_fee_ata);
+  // Source of truth: DexConfig.areal_fee_destination (RWT ATA). Pre-resolved
+  // in main() so we don't re-fetch on every smoke.
+  const arealFeeAta = ctx.arealFeeAccount;
 
   const poolState = await fetchAndParsePool(conn, pool);
   const config = await fetchAndParseDexConfig(conn, dexConfig);
@@ -800,7 +814,8 @@ async function smokeMasterPoolUsdcToRwt(ctx: SmokeContext): Promise<SmokeResult>
   const vaultB = new PublicKey(art.pdas.master_pool_vault_b!);
   const binArray = new PublicKey(art.pdas.master_pool_bin_array);
   const dexConfig = new PublicKey(art.pdas.dex_config);
-  const arealFeeAta = new PublicKey(art.pdas.areal_fee_ata);
+  // Source of truth: DexConfig.areal_fee_destination (RWT ATA).
+  const arealFeeAta = ctx.arealFeeAccount;
   const rwtVault = new PublicKey(art.pdas.rwt_vault);
   const rwtMint = new PublicKey(art.mints.rwt_mint);
   const usdcMint = new PublicKey(art.mints.usdc_test_mint);
@@ -863,6 +878,18 @@ async function smokeMasterPoolUsdcToRwt(ctx: SmokeContext): Promise<SmokeResult>
   // Master pool: master pools have has_ot_treasury=false (CP-4 invariant).
   // Supply BinArray (always) + 5 mint-route slots so the on-chain gate can
   // pick the path data-driven.
+  //
+  // Account distinction — DO NOT collapse to a single value:
+  //   - `arealFeeAccount`              == DexConfig.areal_fee_destination (RWT ATA)
+  //   - mint-route `daoFeeAccount`     == RwtVault.areal_fee_destination  (USDC ATA)
+  // `mint_rwt::handler` enforces `dao_fee_mint == capital_mint == USDC`
+  // (contracts/rwt-engine/src/instructions/mint_rwt.rs:65,77). The DEX path
+  // is RWT-only per docs §71. The mint-route branch suppresses the DEX
+  // protocol-fee transfer entirely, so the RWT-side fee account is unused
+  // when the route fires, but pinocchio still requires the slot to be a
+  // valid SPL token account for parsing (see swap.rs:198 — the mint check
+  // runs before the route gate).
+  const arealFeeAtaUsdc = new PublicKey(art.pdas.areal_fee_ata);
   const ctxSwap: SwapAccountContext = {
     dexProgramId,
     user: user.publicKey,
@@ -876,7 +903,7 @@ async function smokeMasterPoolUsdcToRwt(ctx: SmokeContext): Promise<SmokeResult>
       rwtVault,
       rwtMint,
       capitalAcc,
-      daoFeeAccount: arealFeeAta,
+      daoFeeAccount: arealFeeAtaUsdc,
       rwtEngineProgram: rwtEngineProgramId,
     },
   };
@@ -954,7 +981,8 @@ async function smokeMasterPoolRwtToUsdc(ctx: SmokeContext): Promise<SmokeResult>
   const vaultB = new PublicKey(art.pdas.master_pool_vault_b!);
   const binArray = new PublicKey(art.pdas.master_pool_bin_array);
   const dexConfig = new PublicKey(art.pdas.dex_config);
-  const arealFeeAta = new PublicKey(art.pdas.areal_fee_ata);
+  // Source of truth: DexConfig.areal_fee_destination (RWT ATA).
+  const arealFeeAta = ctx.arealFeeAccount;
 
   const poolState = await fetchAndParsePool(conn, pool);
   const rwtMint = new PublicKey(art.mints.rwt_mint);
@@ -1089,6 +1117,45 @@ async function main(): Promise<void> {
   const dexProgramId = new PublicKey(art.programs.native_dex);
   const rwtEngineProgramId = new PublicKey(art.programs.rwt_engine);
 
+  // Resolve the DEX protocol fee account from on-chain DexConfig — NOT from
+  // `art.pdas.areal_fee_ata` (which is the USDC ATA for OT's revenue path,
+  // per phase-c2 bootstrap rotation). The DEX swap path enforces both
+  // `account == DexConfig.areal_fee_destination` AND `mint == RWT_MINT`
+  // (contracts/native-dex/src/instructions/swap.rs:157,198), so the only
+  // value that will not revert is whatever the on-chain config holds.
+  const dexConfigPubkey = new PublicKey(art.pdas.dex_config);
+  const dexConfigState = await fetchAndParseDexConfig(conn, dexConfigPubkey);
+  const arealFeeAccount = dexConfigState.arealFeeDestination;
+  const rwtMintForVerify = new PublicKey(art.mints.rwt_mint);
+  info(
+    `DexConfig.areal_fee_destination: ${arealFeeAccount.toBase58()} ` +
+      `(expected RWT ATA — RWT mint=${rwtMintForVerify.toBase58()})`,
+  );
+
+  // Ensure the on-chain ATA exists. If bootstrap rotated to a deployer-owned
+  // ATA, it was already created in phase-c2 via `ensureAta`; this idempotent
+  // create is a safety net for re-runs against a partial bootstrap.
+  const arealFeeAccountInfo = await conn.getAccountInfo(arealFeeAccount, 'confirmed');
+  if (!arealFeeAccountInfo) {
+    warn(
+      `areal_fee_account ${arealFeeAccount.toBase58()} does not exist on-chain — ` +
+        `attempting idempotent ATA create (owner=deployer, mint=RWT)`,
+    );
+    const expectedAta = findAta(deployer.publicKey, rwtMintForVerify);
+    if (!expectedAta.equals(arealFeeAccount)) {
+      throw new Error(
+        `areal_fee_account ${arealFeeAccount.toBase58()} is not the deployer's RWT ATA ` +
+          `(expected ${expectedAta.toBase58()}). Cannot reconstruct; rerun bootstrap with ` +
+          `phase-c2 fee-destination rotation.`,
+      );
+    }
+    const createTx = new Transaction().add(
+      createAtaIdempotentIx(deployer.publicKey, deployer.publicKey, rwtMintForVerify),
+    );
+    await sendAndConfirm(conn, createTx, [deployer]);
+    info(`  created RWT ATA ${arealFeeAccount.toBase58()} (owner=deployer)`);
+  }
+
   const ctx: SmokeContext = {
     conn,
     deployer,
@@ -1097,6 +1164,7 @@ async function main(): Promise<void> {
     secrets,
     dexProgramId,
     rwtEngineProgramId,
+    arealFeeAccount,
     results: [],
     keepGoing: args.keepGoing,
   };
