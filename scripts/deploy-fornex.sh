@@ -494,6 +494,13 @@ bootstrap_pools() {
   log "  refreshing bots/node_modules on VPS (npm ci)"
   remote "cd $VPS_REPO_ROOT/bots && npm ci --silent"
 
+  # bootstrap-init.ts uses NODE_PATH=$VPS_REPO_ROOT/bots/node_modules to find
+  # @arlex/client. Locally npm hoists the file://vendor tarball into both
+  # bots/ and sdk/ node_modules; on VPS it only lands in sdk/. Symlink it
+  # into bots/ to bridge the gap (idempotent: -sfn).
+  log "  ensuring @arlex/client symlink in bots/node_modules"
+  remote "mkdir -p $VPS_REPO_ROOT/bots/node_modules/@arlex && ln -sfn $VPS_REPO_ROOT/sdk/node_modules/@arlex/client $VPS_REPO_ROOT/bots/node_modules/@arlex/client"
+
   remote "cd $VPS_REPO_ROOT && PATH=$vps_solana_dir:\$PATH KEEP_LEDGER=1 SKIP_BUILD=1 BOOTSTRAP_TARGET=localhost bash scripts/e2e-bootstrap.sh"
 }
 
