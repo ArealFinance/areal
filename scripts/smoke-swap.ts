@@ -36,6 +36,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  ComputeBudgetProgram,
   Connection,
   Keypair,
   PublicKey,
@@ -917,7 +918,12 @@ async function smokeMasterPoolUsdcToRwt(ctx: SmokeContext): Promise<SmokeResult>
     minAmountOut,
   });
 
-  const tx = new Transaction().add(ix);
+  // Mint-route CPI cascade (DEX swap → rwt_engine::mint_rwt → 3x SPL Token)
+  // legitimately exceeds the 200K default. Real users will also need to set
+  // a higher limit for master-pool USDC→RWT mint-route swaps.
+  const tx = new Transaction()
+    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
+    .add(ix);
   const sig = await sendAndConfirm(conn, tx, [user]);
 
   const inBalAfter = await getTokenBalance(conn, userInAta);
