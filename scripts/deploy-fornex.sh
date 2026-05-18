@@ -486,6 +486,14 @@ bootstrap_pools() {
   # e2e-bootstrap.sh's preflight `command -v solana` check passes.
   local vps_solana_dir
   vps_solana_dir="$(dirname "$VPS_SOLANA_BIN")"
+
+  # bots/node_modules carries @arlex/client + tsx (the runtime for
+  # scripts/lib/bootstrap-init.ts). Stale partial installs on VPS have
+  # produced "Cannot find module '@arlex/client'" — refresh deps via npm ci
+  # (idempotent on warm installs, ~5s; full first-install ~60s).
+  log "  refreshing bots/node_modules on VPS (npm ci)"
+  remote "cd $VPS_REPO_ROOT/bots && npm ci --silent"
+
   remote "cd $VPS_REPO_ROOT && PATH=$vps_solana_dir:\$PATH KEEP_LEDGER=1 SKIP_BUILD=1 BOOTSTRAP_TARGET=localhost bash scripts/e2e-bootstrap.sh"
 }
 
