@@ -461,12 +461,14 @@ deploy_programs() {
     # loudly if it's wrong.
     remote "$VPS_SOLANA_BIN program show $addr --url $VPS_RPC_LOCAL | head -10"
 
-    # `solana program deploy --program-id <pubkey>` performs an upgrade in
-    # place on BPF Loader v3. We pass the raw base58 program ID, not a
-    # keypair file — the program already exists, so its keypair is not
-    # required; only the upgrade authority signature (from --keypair) is.
-    # This avoids needing to propagate keys/vanity/*.json to the VPS.
-    remote "$VPS_SOLANA_BIN program deploy --url $VPS_RPC_LOCAL --keypair $VPS_DEPLOYER_KP --program-id $addr $so"
+    # `solana program deploy --program-id <vanity-kp>` works for BOTH first
+    # deploy (when the program does not exist yet on the validator — fresh
+    # ledger) AND in-place upgrade on BPF Loader v3 (when it does). Step 4.5
+    # ensures the vanity keypair files are present on the VPS at
+    # /opt/areal/keys/vanity/<addr>.json. Passing a raw pubkey here would
+    # fail with "Initial deployments require a keypair" on a fresh ledger.
+    local vanity_kp="$VPS_REPO_ROOT/keys/vanity/${addr}.json"
+    remote "$VPS_SOLANA_BIN program deploy --url $VPS_RPC_LOCAL --keypair $VPS_DEPLOYER_KP --program-id $vanity_kp $so"
   done
 }
 
