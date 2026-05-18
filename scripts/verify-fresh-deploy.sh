@@ -145,24 +145,68 @@ stage_pregen_keypairs() {
     rwt_pk="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('mints',{}).get('rwt_mint_pubkey',''))" "$secrets" 2>/dev/null || echo)"
     usdc_pk="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('mints',{}).get('usdc_test_mint_pubkey',''))" "$secrets" 2>/dev/null || echo)"
     if [[ -n "$rwt_pk" && -n "$usdc_pk" ]]; then
-      log "  reusing existing keypairs from $secrets"
-      log "    RWT_MINT_PUBKEY=$rwt_pk"
-      log "    USDC_MINT_PUBKEY=$usdc_pk"
-      export RWT_MINT_PUBKEY="$rwt_pk"
-      export USDC_MINT_PUBKEY="$usdc_pk"
-      return 0
+      # Sanity-check the canonical ordering invariant (`rwt < usdc` byte-wise)
+      # before reusing. Older secrets files may hold keypairs that violate
+      # this; in that case fall through and regenerate. See the generation
+      # branch below for full rationale (master pool USDC must live on
+      # `vault_b` for CP-7 `grow_liquidity`).
+      if python3 -c "
+import sys, base58
+rwt_bytes = base58.b58decode(sys.argv[1])
+usdc_bytes = base58.b58decode(sys.argv[2])
+sys.exit(0 if rwt_bytes < usdc_bytes else 1)
+" "$rwt_pk" "$usdc_pk"; then
+        log "  reusing existing keypairs from $secrets"
+        log "    RWT_MINT_PUBKEY=$rwt_pk"
+        log "    USDC_MINT_PUBKEY=$usdc_pk"
+        export RWT_MINT_PUBKEY="$rwt_pk"
+        export USDC_MINT_PUBKEY="$usdc_pk"
+        return 0
+      fi
+      log "  existing keypairs violate rwt < usdc invariant (CP-7 grow_liquidity); regenerating"
+      log "    pre-existing RWT=$rwt_pk USDC=$usdc_pk"
     fi
   fi
 
   log "  generating fresh keypairs"
   local tmp_rwt="$DATA_DIR/.pregen-rwt-mint.json"
   local tmp_usdc="$DATA_DIR/.pregen-usdc-mint.json"
-  solana-keygen new --no-bip39-passphrase --silent --outfile "$tmp_rwt" >/dev/null
-  solana-keygen new --no-bip39-passphrase --silent --outfile "$tmp_usdc" >/dev/null
-  chmod 0o600 "$tmp_rwt" "$tmp_usdc" 2>/dev/null || true
 
-  rwt_pk="$(solana-keygen pubkey "$tmp_rwt")"
+  # Generate USDC first, then RWT — retry RWT until its decoded pubkey bytes
+  # sort BEFORE the USDC bytes (`rwt < usdc`). The master pool's canonical
+  # mint ordering (`mint_a < mint_b` in `create_concentrated_pool`) maps to
+  # `vault_a = RWT vault`, `vault_b = USDC vault` only when this byte
+  # invariant holds. `grow_liquidity` (CP-7) hardcodes `pool_vault_b` as the
+  # Nexus-drain destination, so USDC MUST live on `vault_b`. Mainnet pinning
+  # via the canonical `RWT_MINT` vanity bytes (`0x5d…`) guarantees this
+  # naturally; on test-validator the random keypair can land either side
+  # unless we constrain it here.
+  solana-keygen new --no-bip39-passphrase --silent --outfile "$tmp_usdc" >/dev/null
+  chmod 0o600 "$tmp_usdc" 2>/dev/null || true
   usdc_pk="$(solana-keygen pubkey "$tmp_usdc")"
+
+  local attempt=0
+  while :; do
+    solana-keygen new --no-bip39-passphrase --silent --outfile "$tmp_rwt" >/dev/null
+    chmod 0o600 "$tmp_rwt" 2>/dev/null || true
+    rwt_pk="$(solana-keygen pubkey "$tmp_rwt")"
+    # Decode both base58 pubkeys to raw bytes and compare lexicographically.
+    # ~50% chance of `rwt < usdc` per attempt → effectively single-iteration.
+    if python3 -c "
+import sys, base58
+rwt_bytes = base58.b58decode(sys.argv[1])
+usdc_bytes = base58.b58decode(sys.argv[2])
+sys.exit(0 if rwt_bytes < usdc_bytes else 1)
+" "$rwt_pk" "$usdc_pk"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    if (( attempt > 200 )); then
+      log "FATAL: failed to generate RWT mint with rwt < usdc after $attempt attempts"
+      exit 1
+    fi
+  done
+  log "  RWT mint generated with canonical order rwt < usdc ($((attempt + 1)) attempt(s))"
 
   local rwt_b64 usdc_b64
   rwt_b64="$(python3 -c "import json,base64,sys; raw=json.load(open(sys.argv[1])); print(base64.b64encode(bytes(raw)).decode())" "$tmp_rwt")"

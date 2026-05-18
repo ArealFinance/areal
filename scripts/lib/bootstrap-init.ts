@@ -226,6 +226,15 @@ interface Artifact {
     // SD-4); the bin array PDA is required for any subsequent add_liquidity /
     // swap CPI on it.
     master_pool_bin_array?: string;
+    // CP-7 (2026-05-18) — Nexus-owned USDC ATA seeded by `grow_liquidity` to
+    // populate the master pool's initial bid wall. Recorded for off-chain
+    // observability + smoke-swap assertions; the canonical derivation is
+    // `findAta(liquidity_nexus, usdc_test_mint)`.
+    master_pool_nexus_usdc_ata?: string;
+    // CP-7 (2026-05-18) — `PoolState.last_rebalance_nav_bin` after the
+    // bootstrap's first `grow_liquidity` call. Diagnostic-only; the
+    // pool-rebalancer bot reads this field directly from on-chain state.
+    master_pool_last_rebalance_nav_bin?: string;
     arl_rwt_pool?: string;
     arl_rwt_pool_vault_a?: string;
     arl_rwt_pool_vault_b?: string;
@@ -923,12 +932,38 @@ async function phaseRwtVault(
     return;
   }
 
-  // Reuse RWT mint kp from artifact if present (warm restart support).
+  // Reuse RWT mint kp from artifact if present (warm restart support). On a
+  // fresh deploy, retry generation until the RWT mint sorts BEFORE the USDC
+  // test mint in canonical lex order — i.e. `rwt < usdc` byte-wise. The
+  // master pool's `create_concentrated_pool` orders `vault_a / vault_b` by
+  // `mint_a < mint_b`, so this constraint pins USDC to side B. Pinning
+  // matters for `grow_liquidity` (CP-7 Pool Rebalancer): the on-chain handler
+  // hardcodes `pool_vault_b` as the Nexus-drain destination, so USDC MUST
+  // live on `vault_b`. Mainnet satisfies this automatically (RWT_MINT vanity
+  // bytes start with `0x5d…` < USDC mainnet `EPjF…` ≈ `0xc6…`); on
+  // test-validator the random RWT mint can land either side of USDC unless
+  // we constrain it here.
   let rwtMintKp: Keypair;
   if (art.mints?.rwt_mint_keypair_b64) {
     rwtMintKp = keypairFromB64(art.mints.rwt_mint_keypair_b64);
   } else {
-    rwtMintKp = Keypair.generate();
+    const usdcBytes = usdcMint.toBuffer();
+    let attempts = 0;
+    do {
+      rwtMintKp = Keypair.generate();
+      attempts++;
+      if (attempts > 200) {
+        // Astronomically unlikely (≈ 2^-200 probability). Defensive cap so
+        // a degenerate RNG can't spin forever.
+        throw new Error(
+          `phase-c: failed to generate RWT mint with rwt < usdc after ${attempts} attempts`,
+        );
+      }
+    } while (rwtMintKp.publicKey.toBuffer().compare(usdcBytes) >= 0);
+    log(
+      'phase-c',
+      `RWT mint generated with canonical order rwt < usdc (${attempts} attempt${attempts > 1 ? 's' : ''})`,
+    );
   }
   const capAta = findAta(vaultPda, usdcMint);
 
@@ -1279,6 +1314,17 @@ const MASTER_POOL_SEED_RWT: bigint = parseSeedAmount(
   10_000_000_000n,
 );
 
+// Initial USDC parked in the Nexus accumulator for the master pool's first
+// `grow_liquidity` call (CP-7). The on-chain handler drains the full
+// accumulator into `pool_vault_b` and redistributes it across the 40-bin
+// active zone using geometric weights (r = 0.85). 100 USDC (= 100_000_000
+// base units at 6 decimals) is plenty for Smoke 4 (RWT→USDC bin-walk
+// consumes microUSDC-scale amounts per bin).
+const MASTER_POOL_NEXUS_SEED_USDC: bigint = parseSeedAmount(
+  'MASTER_POOL_NEXUS_SEED_USDC_BASE',
+  100_000_000n,
+);
+
 // ARL/RWT governance pool seed: smaller than master pool (governance pair sees
 // far less volume than the protocol's main RWT/USDC pair). 1_000 RWT + 1_000
 // ARL OT — balanced 50/50 split per plan §Phase 4 step 4.
@@ -1308,10 +1354,15 @@ const ARL_INITIAL_SUPPLY: bigint = parseSeedAmount(
 const MASTER_POOL_BIN_STEP_BPS = 10;
 const MASTER_POOL_INITIAL_ACTIVE_BIN = 0;
 // CP-4 (contracts f4d393e) — required 3rd arg for create_concentrated_pool.
-// 100 bps = NAV − 1% places the permanent tail floor 10 bins below the
-// initial active bin (with bin_step_bps=10) — the documented default.
+// 500 bps places `left_anchor_bin = initial_active_bin − 50` (with
+// bin_step_bps=10). This leaves room for the Pool Rebalancer's first
+// `grow_liquidity` call: with `new_nav_bin = initial_active_bin + 1 = 1`
+// and `ACTIVE_ZONE_WIDTH = 40` the new active zone spans bins [−38..1].
+// `grow_redistribute` rejects with `ActiveZoneOverlapsTail` when
+// `new_zone_lower < left_anchor_bin`, so we need `left_anchor_bin ≤ −38`,
+// i.e. `permanent_tail_offset_bps ≥ 390`. 500 gives 12 bins of headroom.
 // Minimum floor enforced on-chain is MIN_PERMANENT_TAIL_OFFSET_BPS = 30.
-const MASTER_POOL_PERMANENT_TAIL_OFFSET_BPS = 100;
+const MASTER_POOL_PERMANENT_TAIL_OFFSET_BPS = 500;
 
 async function phaseMasterPool(
   conn: Connection,
@@ -1462,36 +1513,53 @@ async function phaseMasterPool(
     return;
   }
 
-  const existingLiquidity = await getTokenBalance(conn, vaultA);
-  if (existingLiquidity > 0n) {
-    log('phase-f', `pool already seeded (vaultA=${existingLiquidity.toString()})`);
-    return;
-  }
-
-  if (!ixExists(dexIdl, 'add_liquidity')) {
-    warn('phase-f', 'DEX IDL missing add_liquidity; skipping seed');
-    skipped.push('DEX::add_liquidity master seed');
+  // Master pool USDC vault must be `vault_b` — `grow_liquidity` hardcodes
+  // `pool_vault_b` as the Nexus-drain destination (CP-7), and the canonical
+  // master pool layout pins RWT to side A / USDC to side B. `phaseRwtVault`
+  // enforces `rwt < usdc` byte-wise so this invariant holds on test-validator;
+  // mainnet satisfies it via the pinned `RWT_MINT` vanity bytes vs
+  // `EPjFW…` USDC mint. If somehow this ever flipped, surface a loud skip
+  // rather than silently corrupting downstream Smoke 4 (RWT→USDC bin-walk).
+  if (!tokenB.equals(usdcMint)) {
+    warn(
+      'phase-f',
+      `USDC mint is on side A (canonical order broke); skipping bid-wall seed. ` +
+        `Expected tokenB == USDC (usdc=${usdcMint.toBase58()}, rwt=${rwtMint.toBase58()})`,
+    );
+    skipped.push('DEX::grow_liquidity master seed (USDC on side A)');
     art.init_skipped = skipped;
     return;
   }
 
-  // Provider needs USDC + RWT in their ATAs. The deployer is the bootstrap
-  // signer, but RWT mint authority is the vault PDA, so we need admin_mint_rwt
-  // to obtain RWT for the seed.
-  const deployerUsdcAta = await ensureAta(conn, deployer, usdcMint, deployer.publicKey);
+  // Bid wall seed via the canonical CP-7 Pool Rebalancer path:
+  //   1. Top up Nexus USDC accumulator from deployer.
+  //   2. Call `grow_liquidity(new_nav_bin = initial_active_bin + 1,
+  //      active_zone_width = ACTIVE_ZONE_WIDTH)` so the on-chain handler
+  //      drains the accumulator into `pool_vault_b` and redistributes it
+  //      across the 40-bin active zone (geometric density, r = 0.85).
+  //
+  // The deployer signs `grow_liquidity` — at this point in the bootstrap
+  // `dex_config.rebalancer == deployer.publicKey` (set in `phaseSingletons`).
+  // `phaseRegisterBots` later rotates the slot to the pool-rebalancer bot
+  // keypair, but that runs after `phaseMasterPool` so the deployer is still
+  // the rebalancer here.
+  //
+  // The legacy `add_liquidity` path was blocked by the CP-5 user-LP guard
+  // (`MasterPoolUserLpDisabled` — master pools forbid direct LP adds; only
+  // the Nexus-mediated growth/compress flow may seed them).
+
+  // Create deployer RWT ATA — admin_mint_rwt below funds it so
+  // `smoke-swap.ts::fundUserToken` can Transfer 100 RWT to the user wallet
+  // (RWT mint authority is the vault PDA, not the deployer, so user funding
+  // happens via Transfer from a pre-seeded deployer ATA). Without this the
+  // RWT-input smokes skip.
   const deployerRwtAta = await ensureAta(conn, deployer, rwtMint, deployer.publicKey);
 
-  // Top up deployer USDC ATA to the seed amount (idempotent: only mints the
-  // delta).
-  const usdcBal = await getTokenBalance(conn, deployerUsdcAta);
-  if (usdcBal < MASTER_POOL_SEED_USDC) {
-    await mintTo(conn, deployer, usdcMint, deployerUsdcAta, MASTER_POOL_SEED_USDC - usdcBal);
-    log(
-      'phase-f',
-      `deployer USDC topped up to ${MASTER_POOL_SEED_USDC.toString()} for master pool seed`,
-    );
-  }
-
+  // 1a. Admin-mint RWT to deployer so downstream smokes can Transfer-fund
+  // their user wallets with RWT (RWT mint authority is the vault PDA, not
+  // deployer, so a direct MintTo is impossible). Best-effort — Smoke 4 only
+  // depends on the bid-wall seed itself; RWT-side balance gating lives in
+  // smoke-swap.
   const rwtIdl = loadIdl('rwt-engine');
   const rwtVaultPda = new PublicKey(art.pdas!.rwt_vault);
   if (ixExists(rwtIdl, 'admin_mint_rwt')) {
@@ -1523,98 +1591,146 @@ async function phaseMasterPool(
           `admin_mint_rwt: minted ${need.toString()} RWT to deployer ATA`,
         );
       } catch (e: unknown) {
+        // Non-fatal: smoke-swap will surface as RWT-funding skip downstream.
         warn(
           'phase-f',
-          `admin_mint_rwt failed: ${e instanceof Error ? e.message : String(e)}`,
+          `admin_mint_rwt failed (RWT-side user funding will skip): ${e instanceof Error ? e.message : String(e)}`,
         );
-        skipped.push('DEX master pool seed (admin_mint_rwt failed)');
-        art.init_skipped = skipped;
-        return;
       }
     }
   } else {
-    warn('phase-f', 'RWT IDL missing admin_mint_rwt; skipping pool seed');
-    skipped.push('DEX master pool seed (no admin_mint_rwt in IDL)');
+    warn('phase-f', 'RWT IDL missing admin_mint_rwt; RWT-side smokes will skip');
+  }
+
+  // 1b. Ensure Nexus PDA + USDC accumulator ATA exist + are funded. Derive
+  // the Nexus PDA from program ID rather than reading the artifact field so
+  // we don't depend on `phaseNexus` already having populated it (the artifact
+  // value is informational; the canonical source of truth is the
+  // `[b"liquidity_nexus"]` seed against the DEX program ID).
+  const [nexusPda] = findPda([Buffer.from('liquidity_nexus')], dexProgramId);
+  const nexusUsdcAta = findAta(nexusPda, usdcMint);
+  // Create the Nexus-owned USDC ATA idempotently. `ensureAta` derives the
+  // canonical ATA and skips if already present. The Nexus PDA owns the ATA
+  // at the SPL Token level — exactly what `grow_liquidity`'s on-chain
+  // `read_token_account_owner(nexus_usdc_ata) == nexus_addr` gate requires.
+  await ensureAta(conn, deployer, usdcMint, nexusPda);
+
+  const nexusBalance = await getTokenBalance(conn, nexusUsdcAta);
+  if (nexusBalance < MASTER_POOL_NEXUS_SEED_USDC) {
+    const need = MASTER_POOL_NEXUS_SEED_USDC - nexusBalance;
+    // Deployer is the USDC test mint authority (`phaseMints::ensureMint`),
+    // so a direct MintTo into the Nexus ATA is the cheapest path. The
+    // canonical alternative — `nexus_deposit` — would bump the on-chain
+    // `total_deposited_usdc` counter, but its mint-pin check (`expected_mint
+    // == USDC_MINT` where `USDC_MINT = [0u8; 32]` on test-validator)
+    // reverts with `InvalidNexusToken` on every devnet/local run, so it
+    // can't be used here without a parallel placeholder-aware fix. MintTo
+    // is safe because the counter is only load-bearing for
+    // `nexus_withdraw_profits::profits-only` invariant which Smoke 4 does
+    // not exercise.
+    await mintTo(conn, deployer, usdcMint, nexusUsdcAta, need);
+    log(
+      'phase-f',
+      `funded Nexus USDC accumulator with ${need.toString()} base units ` +
+        `(ata=${nexusUsdcAta.toBase58()})`,
+    );
+  } else {
+    log(
+      'phase-f',
+      `Nexus USDC accumulator already funded (${nexusBalance.toString()} base units)`,
+    );
+  }
+
+  art.pdas = {
+    ...art.pdas!,
+    master_pool_nexus_usdc_ata: nexusUsdcAta.toBase58(),
+  };
+
+  // 2. Already-seeded short-circuit. After a successful `grow_liquidity` the
+  // active zone bins carry `liquidity_b > 0`; we read one representative bin
+  // (peak == new_nav_bin == initial_active_bin + 1) via the bin-array
+  // account data layout. Re-running the bootstrap on a warm ledger is a
+  // no-op once seeded.
+  const ACTIVE_ZONE_WIDTH = 40;
+  const newNavBin = MASTER_POOL_INITIAL_ACTIVE_BIN + 1;
+  const binArrayInfo = await conn.getAccountInfo(binArrayPda);
+  if (binArrayInfo) {
+    // BinArray layout: 8 disc + 32 pool + bins[MAX_BINS] (16 bytes each:
+    // u64 liquidity_a + u64 liquidity_b) + 4 lower_bin_id + 2 bin_step_bps +
+    // 4 active_bin_id + 1 bump. We only need lower_bin_id + the peak bin's
+    // liquidity_b to detect whether a previous grow already seeded.
+    const BINS_OFFSET = 8 + 32;
+    const BIN_SIZE = 16;
+    // The lower_bin_id is u32 LE at offset (8 + 32 + MAX_BINS*16), but we
+    // already know lower from the contract math: `permanent_tail_floor_bin`
+    // for the canonical bootstrap params is `0 - 50 - 70 = -120`. Use the
+    // contract's computation to derive the index of `newNavBin`.
+    const permanentTailOffsetInBins =
+      MASTER_POOL_PERMANENT_TAIL_OFFSET_BPS / MASTER_POOL_BIN_STEP_BPS;
+    const PERMANENT_TAIL_BIN_COUNT = 70; // contracts/native-dex/src/constants.rs:69
+    const expectedLowerBinId =
+      MASTER_POOL_INITIAL_ACTIVE_BIN - permanentTailOffsetInBins - PERMANENT_TAIL_BIN_COUNT;
+    const peakIndex = newNavBin - expectedLowerBinId;
+    const peakLiquidityBOffset = BINS_OFFSET + peakIndex * BIN_SIZE + 8;
+    if (
+      binArrayInfo.data.length >= peakLiquidityBOffset + 8 &&
+      binArrayInfo.data.readBigUInt64LE(peakLiquidityBOffset) > 0n
+    ) {
+      log(
+        'phase-f',
+        `master pool bid wall already seeded (peak bin ${newNavBin} liquidity_b > 0)`,
+      );
+      return;
+    }
+  }
+
+  if (!ixExists(dexIdl, 'grow_liquidity')) {
+    warn('phase-f', 'DEX IDL missing grow_liquidity; skipping bid wall seed');
+    skipped.push('DEX::grow_liquidity master seed');
     art.init_skipped = skipped;
     return;
   }
 
-  // Map provider ATAs to vault sides based on canonical token order.
-  const providerTokenA = tokenA.equals(usdcMint) ? deployerUsdcAta : deployerRwtAta;
-  const providerTokenB = tokenB.equals(usdcMint) ? deployerUsdcAta : deployerRwtAta;
-  const amountA = tokenA.equals(usdcMint) ? MASTER_POOL_SEED_USDC : MASTER_POOL_SEED_RWT;
-  const amountB = tokenB.equals(usdcMint) ? MASTER_POOL_SEED_USDC : MASTER_POOL_SEED_RWT;
-
-  const [lpPda] = findPda(
-    [Buffer.from('lp'), poolPda.toBuffer(), deployer.publicKey.toBuffer()],
-    dexProgramId,
-  );
-
-  // SEC-26 / R-72 (Layer 10 closure): sandwich protection on non-empty
-  // re-seed. First-add (vault_a == 0) uses min_shares: 0 — the share calc
-  // is deterministic. Non-empty re-seed computes a 1%-slippage floor
-  // client-side via computeMinSharesForReseed (R-72 replacement for the
-  // ALLOW_NONEMPTY_POOL_RESEED operator burden).
-  const vaultABalance = await getTokenBalance(conn, vaultA);
-  let minShares: bigint = 0n;
-  if (vaultABalance > 0n) {
-    minShares = await computeMinSharesForReseed(conn, poolPda, amountA, amountB);
-    log(
-      'phase-f',
-      `non-empty re-seed: computed min_shares=${minShares.toString()} (1% slippage floor)`,
-    );
-  }
-
+  // 3. Submit grow_liquidity. Deployer == rebalancer at this phase (set in
+  // initialize_dex; rotated to the pool-rebalancer bot keypair later in
+  // phaseRegisterBots).
   const dexClient = new ArlexClient(loadIdlForClient('native-dex'), dexProgramId, conn);
-  // SD-6 (filed by Layer 10 substep 2): D40 calls for a 5-bin Gaussian seed
-  // (10/20/40/20/10% across bins -2..+2). The current contract logic
-  // (`concentrated::distribute_to_bins` is_first branch) spreads liquidity
-  // UNIFORMLY across the full 70-bin range with no bin-list argument. So a
-  // single first-add cannot produce a Gaussian shape on-chain.
-  //
-  // For Layer 10 substep 2 we seed a single uniform first-add (matching what
-  // the contract supports) and flag SD-6 for Architect: either the contract
-  // gains a per-bin distribution argument (preferred) or D40 is corrected to
-  // "uniform first-add, Scenario 4 walks via subsequent swaps that displace
-  // active_bin and rebalance via shift_liquidity". The plan-vs-contract
-  // mismatch does NOT block deployment; Scenario 4 acceptance criteria need
-  // updating once the verdict lands.
-  //
-  // SEC-26 — first-add deterministic share calc means min_shares: 0 is safe
-  // only when vault_a == 0 (asserted above).
-  const seedTx = dexClient.buildTransaction('add_liquidity', {
+  const growTx = dexClient.buildTransaction('grow_liquidity', {
     accounts: {
-      provider: deployer.publicKey,
-      payer: deployer.publicKey,
+      rebalancer: deployer.publicKey,
       dex_config: dexConfigPda,
       pool_state: poolPda,
-      lp_position: lpPda,
-      provider_token_a: providerTokenA,
-      provider_token_b: providerTokenB,
-      vault_a: vaultA,
-      vault_b: vaultB,
+      bin_array: binArrayPda,
+      liquidity_nexus: nexusPda,
+      nexus_usdc_ata: nexusUsdcAta,
+      pool_vault_b: vaultB,
+      rwt_vault: rwtVaultPda,
       token_program: TOKEN_PROGRAM_ID,
-      system_program: SYSTEM_PROGRAM_ID,
     },
-    args: { amount_a: Number(amountA), amount_b: Number(amountB), min_shares: Number(minShares) },
-    remainingAccounts: [{ pubkey: binArrayPda, isSigner: false, isWritable: true }],
+    args: {
+      new_nav_bin: newNavBin,
+      active_zone_width: ACTIVE_ZONE_WIDTH,
+    },
     computeUnits: 400_000,
   });
-  // T-10 — match rest-of-file pattern: record send failures as init_failed and
-  // continue rather than aborting. The crank-startup gate downstream checks
-  // init_failed before launch.
   try {
-    await sendAndConfirm(conn, seedTx, [deployer]);
+    await sendAndConfirm(conn, growTx, [deployer]);
     log(
       'phase-f',
-      `master concentrated pool seeded (${amountA.toString()}/${amountB.toString()} base units, uniform — SD-6)`,
+      `master pool bid wall seeded via grow_liquidity ` +
+        `(new_nav_bin=${newNavBin}, active_zone_width=${ACTIVE_ZONE_WIDTH}, ` +
+        `nexus_usdc_drained=${MASTER_POOL_NEXUS_SEED_USDC.toString()})`,
     );
+    art.pdas = {
+      ...art.pdas!,
+      master_pool_last_rebalance_nav_bin: String(newNavBin),
+    };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    warn('phase-f', `master pool add_liquidity failed: ${msg}`);
+    warn('phase-f', `grow_liquidity bid wall seed failed: ${msg}`);
     const head = (msg.split('\n')[0] ?? msg).slice(0, 120);
     const failed = art.init_failed ?? [];
-    failed.push({ phase: 'DEX::add_liquidity master', error: head });
+    failed.push({ phase: 'DEX::grow_liquidity master', error: head });
     art.init_failed = failed;
   }
 }
