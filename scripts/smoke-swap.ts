@@ -64,6 +64,7 @@ import type {
   MasterPoolQuoteContext,
   QuoteOutcome,
 } from '@areal/sdk/native-dex';
+import { decodeTransactionEvents } from '@areal/sdk/events';
 
 // --------------------------------------------------------------------------
 // Constants — mirror contract source
@@ -775,14 +776,17 @@ async function smokeStandardCurve(
     };
   }
 
-  // Fetch logs and grep for SwapExecuted.
+  // Fetch logs and decode Arlex events (sol_log_data base64 payloads — plain
+  // string matching cannot find event names because the wire format is
+  // `Program data: <disc base64> <payload base64>`, not text).
   const txMeta = await conn.getTransaction(sig, {
     commitment: 'confirmed',
     maxSupportedTransactionVersion: 0,
   });
   const logs: string[] = txMeta?.meta?.logMessages ?? [];
-  const sawSwapExecuted = logs.some((l: string) => l.includes('SwapExecuted'));
-  const sawRoutedToMint = logs.some((l: string) => l.includes('SwapRoutedToMint'));
+  const decoded = decodeTransactionEvents(logs, [dexProgramId]);
+  const sawSwapExecuted = decoded.some((e) => e.eventName === 'SwapExecuted');
+  const sawRoutedToMint = decoded.some((e) => e.eventName === 'SwapRoutedToMint');
 
   return {
     name,
@@ -938,8 +942,9 @@ async function smokeMasterPoolUsdcToRwt(ctx: SmokeContext): Promise<SmokeResult>
     maxSupportedTransactionVersion: 0,
   });
   const logs: string[] = txMeta?.meta?.logMessages ?? [];
-  const sawRoutedToMint = logs.some((l: string) => l.includes('SwapRoutedToMint'));
-  const sawSwapExecuted = logs.some((l: string) => l.includes('SwapExecuted'));
+  const decoded = decodeTransactionEvents(logs, [dexProgramId]);
+  const sawRoutedToMint = decoded.some((e) => e.eventName === 'SwapRoutedToMint');
+  const sawSwapExecuted = decoded.some((e) => e.eventName === 'SwapExecuted');
 
   const eventTag = sawRoutedToMint
     ? 'SwapRoutedToMint'
@@ -1078,8 +1083,9 @@ async function smokeMasterPoolRwtToUsdc(ctx: SmokeContext): Promise<SmokeResult>
     maxSupportedTransactionVersion: 0,
   });
   const logs: string[] = txMeta?.meta?.logMessages ?? [];
-  const sawSwapExecuted = logs.some((l: string) => l.includes('SwapExecuted'));
-  const sawRoutedToMint = logs.some((l: string) => l.includes('SwapRoutedToMint'));
+  const decoded = decodeTransactionEvents(logs, [dexProgramId]);
+  const sawSwapExecuted = decoded.some((e) => e.eventName === 'SwapExecuted');
+  const sawRoutedToMint = decoded.some((e) => e.eventName === 'SwapRoutedToMint');
 
   return {
     name,
