@@ -197,6 +197,24 @@ interface Artifact {
     rwt_dist_config: string;
     rwt_capital_accumulator_ata: string;
     areal_fee_ata: string;
+    /**
+     * RWT-denominated protocol fee ATA (deployer owner).
+     *
+     * The DEX `swap` / `zap_liquidity` paths validate
+     * `accounts.areal_fee_account.mint == RWT_MINT` after the address-equality
+     * check against `DexConfig.areal_fee_destination`. Per docs/contracts/
+     * native-dex.mdx §71, all DEX fees are charged in RWT. `initialize_dex`
+     * runs before `phaseRwtVault`, so the RWT mint doesn't exist yet at init
+     * time — bootstrap populates `areal_fee_destination` with the USDC ATA,
+     * then rotates to this RWT ATA via `update_areal_fee_destination` after
+     * `phaseYdConfig` (which creates this same RWT ATA for YD's distinct
+     * `areal_fee_destination_account`).
+     *
+     * `areal_fee_ata` (USDC) is retained because `OT::initialize_ot` stores
+     * it on each `OtConfig` for `distribute_revenue` (which moves USDC
+     * royalties, not RWT — different fee surface, same wallet).
+     */
+    areal_fee_ata_rwt?: string;
     liquidity_holding?: string;
     liquidity_holding_ata?: string;
     liquidity_nexus?: string;
@@ -972,41 +990,116 @@ async function phaseYdConfig(
   const rwtMint = new PublicKey(art.mints.rwt_mint);
   const [ydDistConfigPda] = findPda([Buffer.from('dist_config')], ydProgramId);
 
-  const ydConfigInfo = await conn.getAccountInfo(ydDistConfigPda);
-  if (ydConfigInfo) {
-    log('phase-c2', 'YD::initialize_config skip (already initialized)');
-    return;
-  }
-  if (!ixExists(ydIdl, 'initialize_config')) {
-    warn('phase-c2', 'YD IDL missing initialize_config; skipping');
-    skipped.push('YD::initialize_config');
-    art.init_skipped = skipped;
-    return;
-  }
-
   // Per Layer 7 design (and convert_to_rwt fee_account constraint), the YD
   // areal_fee_destination_account MUST be RWT-denominated and the value is
-  // immutable after init. Create deployer's RWT ATA — it will later be
-  // rotated to a multisig-owned ATA in mainnet bootstrap (out of scope).
+  // immutable after init. Create deployer's RWT ATA upfront — it serves
+  // BOTH the YD::initialize_config call below AND the DEX
+  // `areal_fee_destination` rotation at the end of this phase. Computing it
+  // before the "already initialized" gate is critical: a warm validator with
+  // a pre-existing YD config (e.g. VPS chain) must still drop through to
+  // the DEX rotation block, otherwise every swap reverts with
+  // `InvalidProtocolFeeDestination` (0x178e).
+  // It will later be rotated to a multisig-owned ATA in mainnet bootstrap
+  // (out of scope).
   const rwtArealFeeAta = await ensureAta(conn, deployer, rwtMint, deployer.publicKey);
   log('phase-c2', `yd_areal_fee_ata (RWT)=${rwtArealFeeAta.toBase58()}`);
 
-  const ydClient = new ArlexClient(loadIdlForClient('yield-distribution'), ydProgramId, conn);
-  const tx = ydClient.buildTransaction('initialize_config', {
-    accounts: {
-      deployer: deployer.publicKey,
-      config: ydDistConfigPda,
-      areal_fee_destination_account: rwtArealFeeAta,
-      system_program: SYSTEM_PROGRAM_ID,
-    },
-    args: {
-      publish_authority: Array.from(deployer.publicKey.toBytes()),
-      protocol_fee_bps: 25,
-      min_distribution_amount: 1_000_000,
-    },
-  });
-  await sendAndConfirm(conn, tx, [deployer]);
-  log('phase-c2', `YD::initialize_config OK (config=${ydDistConfigPda.toBase58()})`);
+  const ydConfigInfo = await conn.getAccountInfo(ydDistConfigPda);
+  if (ydConfigInfo) {
+    log('phase-c2', 'YD::initialize_config skip (already initialized)');
+  } else if (!ixExists(ydIdl, 'initialize_config')) {
+    warn('phase-c2', 'YD IDL missing initialize_config; skipping');
+    skipped.push('YD::initialize_config');
+  } else {
+    const ydClient = new ArlexClient(loadIdlForClient('yield-distribution'), ydProgramId, conn);
+    const tx = ydClient.buildTransaction('initialize_config', {
+      accounts: {
+        deployer: deployer.publicKey,
+        config: ydDistConfigPda,
+        areal_fee_destination_account: rwtArealFeeAta,
+        system_program: SYSTEM_PROGRAM_ID,
+      },
+      args: {
+        publish_authority: Array.from(deployer.publicKey.toBytes()),
+        protocol_fee_bps: 25,
+        min_distribution_amount: 1_000_000,
+      },
+    });
+    await sendAndConfirm(conn, tx, [deployer]);
+    log('phase-c2', `YD::initialize_config OK (config=${ydDistConfigPda.toBase58()})`);
+  }
+
+  // ---------------------------------------------------------------------
+  // Rotate DexConfig.areal_fee_destination to the RWT-denominated ATA.
+  //
+  // Why here: `initialize_dex` runs before `phaseRwtVault`, so at init time
+  // the RWT mint doesn't exist and bootstrap is forced to seed
+  // `areal_fee_destination` with the USDC ATA. The DEX swap/zap_liquidity
+  // paths validate `read_token_account_mint(areal_fee_account) == RWT_MINT`
+  // (contracts/native-dex/src/instructions/swap.rs:198, zap_liquidity.rs:201;
+  // docs/contracts/native-dex.mdx §71 — "All fees are charged on top of the
+  // swap amount in RWT"). Without rotation, every swap reverts with
+  // `InvalidProtocolFeeDestination` (0x178e).
+  //
+  // The `update_areal_fee_destination` instruction re-asserts the mint check
+  // (see contracts/native-dex/src/instructions/update_areal_fee_destination.rs)
+  // so the stored value is always an RWT ATA after this point. Idempotent:
+  // we only call it when the current stored value differs.
+  // ---------------------------------------------------------------------
+  const dexProgramId = new PublicKey(art.programs.native_dex);
+  const dexIdl = loadIdl('native-dex');
+  const [dexConfigPda] = findPda([Buffer.from('dex_config')], dexProgramId);
+  if (!ixExists(dexIdl, 'update_areal_fee_destination')) {
+    warn(
+      'phase-c2',
+      'native-dex IDL missing update_areal_fee_destination; cannot rotate ' +
+        'DexConfig.areal_fee_destination to RWT ATA (swap will revert with ' +
+        'InvalidProtocolFeeDestination until the contract is rebuilt).',
+    );
+    skipped.push('DEX::update_areal_fee_destination (IDL missing)');
+  } else {
+    const dexConfigInfo = await conn.getAccountInfo(dexConfigPda);
+    if (!dexConfigInfo) {
+      warn('phase-c2', 'dex_config not initialized; skipping fee-destination rotation');
+      skipped.push('DEX::update_areal_fee_destination (dex_config missing)');
+    } else {
+      // DexConfig layout offset for `areal_fee_destination`:
+      //   8  (disc) + 32 (authority) + 32 (pending_authority) + 1 (has_pending)
+      // + 32 (pause_authority) + 2 (base_fee_bps) + 2 (lp_fee_share_bps) = 109
+      // SDK accounts.generated.ts confirms the field is at packed offset 101
+      // post-discriminator → 109 absolute.
+      const stored = new PublicKey(dexConfigInfo.data.subarray(109, 109 + 32));
+      if (stored.equals(rwtArealFeeAta)) {
+        log('phase-c2', 'DEX::update_areal_fee_destination skip (already RWT ATA)');
+      } else {
+        const dexClient = new ArlexClient(loadIdlForClient('native-dex'), dexProgramId, conn);
+        const rotateTx = dexClient.buildTransaction('update_areal_fee_destination', {
+          accounts: {
+            authority: deployer.publicKey,
+            dex_config: dexConfigPda,
+            new_areal_fee_account: rwtArealFeeAta,
+          },
+          args: {},
+        });
+        await sendAndConfirm(conn, rotateTx, [deployer]);
+        log(
+          'phase-c2',
+          `DEX::update_areal_fee_destination OK ` +
+            `(old=${stored.toBase58()} new=${rwtArealFeeAta.toBase58()})`,
+        );
+      }
+    }
+  }
+
+  // Expose the RWT ATA on the artifact so smoke-swap, scripted swap helpers,
+  // and any future LP-side helper can derive the correct DEX fee account
+  // without recomputing it. `areal_fee_ata` (USDC) stays untouched because
+  // OT::distribute_revenue (USDC-denominated) still depends on it.
+  art.pdas = {
+    ...art.pdas!,
+    areal_fee_ata_rwt: rwtArealFeeAta.toBase58(),
+  };
+
   art.init_skipped = skipped;
 }
 

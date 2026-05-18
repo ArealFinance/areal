@@ -97,6 +97,7 @@ SSH_HOST="vps-vpn"
 VPS_REPO_ROOT="/opt/areal"
 VPS_DEPLOYER_KP="/root/.config/solana/deploy-keypair.json"
 VPS_SECRETS_FILE="$VPS_REPO_ROOT/data/e2e-bootstrap.secrets.json"
+VPS_ARTIFACT_FILE="$VPS_REPO_ROOT/data/e2e-bootstrap.json"
 VPS_SOLANA_BIN="/root/.local/share/solana/install/active_release/bin/solana"
 # VPS validator binds 0.0.0.0:8899/8900; firewall blocks external — accessible
 # only through SSH tunnel.
@@ -111,6 +112,7 @@ SMOKE_RPC_URL="http://127.0.0.1:${TUNNEL_RPC_PORT}"
 # Local files we may need to push to the VPS.
 LOCAL_DEPLOYER_KP="$ROOT_DIR/deploy-keypair.json"
 LOCAL_SECRETS_FILE="$DATA_DIR/e2e-bootstrap.secrets.json"
+LOCAL_ARTIFACT_FILE="$DATA_DIR/e2e-bootstrap.json"
 
 # Canonical vanity program IDs (mirrors PROGRAMS array in e2e-bootstrap.sh).
 # crate-name : on-chain program ID
@@ -160,6 +162,24 @@ push_file() {
   fi
   scp -q "$src" "$SSH_HOST:$dst"
   ssh "$SSH_HOST" "chmod $mode $dst"
+}
+
+# Pull a remote file to a local path. Used to sync the VPS bootstrap artifact
+# down to the operator's mac before running smoke-swap from local (smoke reads
+# data/e2e-bootstrap.json relative to the repo root and talks to the VPS RPC
+# via the SSH tunnel — the artifact MUST reflect VPS chain state, otherwise
+# vault PDAs from a prior local run leak in and "wrong owner for 'vault_in'"
+# fires in account validation).
+pull_file() {
+  local src="$1" dst="$2"
+  log "[scp] $SSH_HOST:$src -> $dst"
+  if (( DRY_RUN )); then
+    return 0
+  fi
+  # sudo cat over ssh keeps the pull working when $src is owned by root with
+  # 0600 mode (which is how bootstrap-init writes data/e2e-bootstrap.json on
+  # VPS). scp would require relaxing remote perms; we keep them as-is.
+  ssh "$SSH_HOST" "sudo cat $src" > "$dst"
 }
 
 # ----------------------------------------------------------------------------
@@ -512,6 +532,29 @@ bootstrap_pools() {
 
 run_smoke() {
   open_tunnel
+
+  # Pull VPS-side bootstrap artifact down to local before running smoke.
+  # smoke-swap.ts hard-codes ARTIFACT_PATH = $REPO_ROOT/data/e2e-bootstrap.json
+  # — it always reads the LOCAL file, even when --rpc points elsewhere. After a
+  # fresh VPS bootstrap the on-chain vault PDAs (random Keypair.generate())
+  # differ from any prior LOCAL test-validator artifact; without this sync the
+  # smoke sends stale local vault pubkeys to VPS RPC and the contract reverts
+  # with "Arlex: wrong owner for 'vault_in'" (zero-lamport System-owned dummy
+  # at the unknown address).
+  log "step 8a.1: syncing VPS bootstrap artifact to local"
+  if (( DRY_RUN )); then
+    log "  (dry-run: skipping artifact sync)"
+  else
+    mkdir -p "$DATA_DIR"
+    # Back up any pre-existing local artifact so a local test-validator run
+    # can be restored later if desired.
+    if [[ -f "$LOCAL_ARTIFACT_FILE" ]]; then
+      cp -f "$LOCAL_ARTIFACT_FILE" "${LOCAL_ARTIFACT_FILE}.preFornexBackup"
+      log "  backed up existing local artifact -> ${LOCAL_ARTIFACT_FILE}.preFornexBackup"
+    fi
+    pull_file "$VPS_ARTIFACT_FILE" "$LOCAL_ARTIFACT_FILE"
+  fi
+
   log "step 8b: running scripts/smoke-swap.ts against VPS RPC ($SMOKE_RPC_URL)"
   if (( DRY_RUN )); then
     log "  (dry-run: skipping)"
