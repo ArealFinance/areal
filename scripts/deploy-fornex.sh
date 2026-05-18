@@ -4,7 +4,10 @@
 #
 # Mirrors verify-fresh-deploy.sh's local-mac flow but targets the Fornex VPS
 # test-validator. Operator runs THIS script from a local mac; it SSHes to the
-# `vps-vpn` alias as root, syncs /opt/areal, builds contracts on the VPS,
+# `vps-vpn` alias as root, syncs /opt/areal, BUILDS contracts LOCALLY on the
+# mac and rsyncs the .so artifacts to the VPS (the VPS has no Rust/cargo-
+# build-sbf toolchain, and installing it is invasive — full Rust + Solana
+# platform-tools cache, none of which the VPS needs for any other purpose),
 # upgrades 5 programs in place at their canonical vanity IDs (authority match
 # was verified out-of-band — see Phase 2 spec), runs e2e-bootstrap on the VPS
 # to seed singletons + pools, then opens a local SSH tunnel and runs
@@ -26,8 +29,10 @@
 # a manual program-upgrade loop instead.
 #
 # Flags:
-#   --dry-run         Echo every SSH command without executing.
-#   --skip-build      Reuse VPS .so artifacts (don't run cargo build-sbf).
+#   --dry-run         Echo every SSH/local command without executing.
+#   --skip-build      Reuse remote .so artifacts already present in
+#                     /opt/areal/contracts/target/deploy/ on the VPS — skips
+#                     BOTH the local `cargo build-sbf` AND the rsync push.
 #   --skip-deploy     Skip the 5-program upgrade step (test bootstrap + smoke
 #                     in isolation against already-deployed programs).
 #   --smoke-only      Skip everything pre-tunnel; only open SSH tunnel + run
@@ -326,19 +331,74 @@ push_secrets() {
 }
 
 # ----------------------------------------------------------------------------
-# Step 5 — build contracts on VPS
+# Step 5 — build contracts LOCALLY on the mac, rsync .so artifacts to VPS
 # ----------------------------------------------------------------------------
+#
+# Rationale: the Fornex VPS only has Node.js + solana-cli installed. Adding
+# Rust + cargo-build-sbf + the Solana platform-tools cache (~1 GB) just to
+# rebuild .so files that the mac already builds cleanly is wasteful and
+# expands the VPS attack surface for no operational benefit. We build the
+# 5 .so artifacts locally (where the toolchain is always current alongside
+# the source) and rsync them into the same path the VPS-side step 6
+# (`solana program deploy`) already reads from.
+
+LOCAL_DEPLOY_DIR="$ROOT_DIR/contracts/target/deploy"
+VPS_DEPLOY_DIR="$VPS_REPO_ROOT/contracts/target/deploy"
+
+# Crate-name (snake_case) artifacts produced by `cargo build-sbf` in the
+# contracts workspace. Must match the crate_snake derivation in step 6's
+# deploy_programs() loop.
+CONTRACT_SO_FILES=(
+  "futarchy.so"
+  "native_dex.so"
+  "ownership_token.so"
+  "rwt_engine.so"
+  "yield_distribution.so"
+)
 
 build_contracts() {
   if (( SKIP_BUILD )); then
-    log "step 5: --skip-build set; reusing existing .so artifacts on VPS"
+    log "step 5: --skip-build set; skipping local build AND rsync (using existing remote .so artifacts on VPS at $VPS_DEPLOY_DIR)"
     return 0
   fi
-  log "step 5: building contracts on VPS (cargo build-sbf)"
-  # cd into contracts/ which is the workspace root for all 5 crates. The
-  # SBF toolchain is expected to already be installed on the VPS (cargo,
-  # cargo-build-sbf via solana-cli).
-  remote "cd $VPS_REPO_ROOT/contracts && cargo build-sbf"
+
+  log "step 5a: building contracts LOCALLY on mac (cargo build-sbf in contracts/)"
+  if (( DRY_RUN )); then
+    log "  [local] cd $ROOT_DIR/contracts && cargo build-sbf"
+  else
+    (
+      cd "$ROOT_DIR/contracts"
+      cargo build-sbf
+    )
+  fi
+
+  # Sanity-check all 5 artifacts exist locally before we try to push them.
+  if (( ! DRY_RUN )); then
+    for so in "${CONTRACT_SO_FILES[@]}"; do
+      if [[ ! -f "$LOCAL_DEPLOY_DIR/$so" ]]; then
+        log "ERROR: local artifact missing after build: $LOCAL_DEPLOY_DIR/$so"
+        exit 1
+      fi
+    done
+    log "  local artifacts: 5/5 present in $LOCAL_DEPLOY_DIR"
+  fi
+
+  log "step 5b: ensuring remote deploy dir exists on VPS"
+  remote "mkdir -p $VPS_DEPLOY_DIR"
+
+  log "step 5c: rsyncing .so artifacts to $SSH_HOST:$VPS_DEPLOY_DIR/"
+  # --include='*.so' / --exclude='*' isolates the 5 BPF artifacts so we don't
+  # accidentally drag debug symbols, *-keypair.json, or the entire build tree
+  # onto the VPS. -a preserves perms/timestamps; --progress is human-friendly
+  # in the tee'd log without being spammy (one line per file).
+  log "[rsync] $LOCAL_DEPLOY_DIR/ -> $SSH_HOST:$VPS_DEPLOY_DIR/"
+  if (( DRY_RUN )); then
+    log "  (dry-run: skipping)"
+  else
+    rsync -av --progress \
+      --include='*.so' --exclude='*' \
+      "$LOCAL_DEPLOY_DIR/" "$SSH_HOST:$VPS_DEPLOY_DIR/"
+  fi
 }
 
 # ----------------------------------------------------------------------------
