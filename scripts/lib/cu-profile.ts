@@ -108,7 +108,7 @@ interface BootstrapState {
   };
   mints?: {
     usdc_test_mint: string;
-    arl_ot_mint?: string;
+    sprk_ot_mint?: string;
     rwt_mint?: string;
   };
   pdas?: {

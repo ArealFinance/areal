@@ -11,7 +11,7 @@
  * green at the state level, this script confirms the swap path is wired
  * end-to-end:
  *
- *   Smoke 1: StandardCurve OT→RWT swap   (ARL/RWT pool, a→b or b→a)
+ *   Smoke 1: StandardCurve OT→RWT swap   (SPRK/RWT pool, a→b or b→a)
  *   Smoke 2: StandardCurve RWT→OT swap   (reverse direction, fees from RWT)
  *   Smoke 3: Master pool USDC→RWT swap   (expect route=mintRoute, NO DEX fee)
  *   Smoke 4: Master pool RWT→USDC swap   (expect route=binWalk, requires
@@ -111,7 +111,7 @@ interface Artifact {
   mints: {
     rwt_mint: string;
     usdc_test_mint: string;
-    arl_ot_mint: string;
+    sprk_ot_mint: string;
   };
   pdas: {
     dex_config: string;
@@ -119,9 +119,9 @@ interface Artifact {
     master_pool_vault_a?: string;
     master_pool_vault_b?: string;
     master_pool_bin_array?: string;
-    arl_rwt_pool?: string;
-    arl_rwt_pool_vault_a?: string;
-    arl_rwt_pool_vault_b?: string;
+    sprk_rwt_pool?: string;
+    sprk_rwt_pool_vault_a?: string;
+    sprk_rwt_pool_vault_b?: string;
     rwt_vault: string;
     rwt_capital_accumulator_ata: string;
     areal_fee_ata: string;
@@ -133,7 +133,7 @@ interface Secrets {
   deployer_keypair_path: string;
   mints: {
     usdc_test_mint_keypair_b64?: string;
-    arl_ot_mint_keypair_b64?: string;
+    sprk_ot_mint_keypair_b64?: string;
     rwt_mint_keypair_b64?: string;
   };
 }
@@ -620,7 +620,7 @@ async function setupUser(ctx: SmokeContext): Promise<void> {
   info(`  airdropped 5 SOL: ${sig}`);
 
   // Create ATAs for OT, RWT, USDC.
-  const otMint = new PublicKey(art.mints.arl_ot_mint);
+  const otMint = new PublicKey(art.mints.sprk_ot_mint);
   const rwtMint = new PublicKey(art.mints.rwt_mint);
   const usdcMint = new PublicKey(art.mints.usdc_test_mint);
 
@@ -659,17 +659,17 @@ async function smokeStandardCurve(
     direction === 'ot_to_rwt' ? 'StandardCurve OT→RWT' : 'StandardCurve RWT→OT';
   const { conn, user, art, dexProgramId } = ctx;
 
-  if (!art.pdas.arl_rwt_pool || !art.pdas.arl_rwt_pool_vault_a || !art.pdas.arl_rwt_pool_vault_b) {
+  if (!art.pdas.sprk_rwt_pool || !art.pdas.sprk_rwt_pool_vault_a || !art.pdas.sprk_rwt_pool_vault_b) {
     return {
       name,
       status: 'skipped',
-      details: 'arl_rwt_pool not initialized (Substep 2 phaseArlRwtPool skipped)',
+      details: 'sprk_rwt_pool not initialized (Substep 2 phaseSprkRwtPool skipped)',
     };
   }
 
-  const pool = new PublicKey(art.pdas.arl_rwt_pool);
-  const vaultA = new PublicKey(art.pdas.arl_rwt_pool_vault_a);
-  const vaultB = new PublicKey(art.pdas.arl_rwt_pool_vault_b);
+  const pool = new PublicKey(art.pdas.sprk_rwt_pool);
+  const vaultA = new PublicKey(art.pdas.sprk_rwt_pool_vault_a);
+  const vaultB = new PublicKey(art.pdas.sprk_rwt_pool_vault_b);
   const dexConfig = new PublicKey(art.pdas.dex_config);
   // Source of truth: DexConfig.areal_fee_destination (RWT ATA). Pre-resolved
   // in main() so we don't re-fetch on every smoke.
@@ -682,12 +682,12 @@ async function smokeStandardCurve(
   // Decide a→b based on which side is the input.
   const inputMint =
     direction === 'ot_to_rwt'
-      ? new PublicKey(art.mints.arl_ot_mint)
+      ? new PublicKey(art.mints.sprk_ot_mint)
       : rwtMint;
   const outputMint =
     direction === 'ot_to_rwt'
       ? rwtMint
-      : new PublicKey(art.mints.arl_ot_mint);
+      : new PublicKey(art.mints.sprk_ot_mint);
   const aToB = poolState.tokenAMint.equals(inputMint);
 
   const amountIn = direction === 'ot_to_rwt' ? SC_OT_TO_RWT_AMOUNT : SC_RWT_TO_OT_AMOUNT;
@@ -725,7 +725,7 @@ async function smokeStandardCurve(
 
   const minAmountOut = applyBpsFloor(q.amountOut, DEFAULT_SLIPPAGE_BPS);
 
-  // OT-treasury fee dest — ARL/RWT pool has it.
+  // OT-treasury fee dest — SPRK/RWT pool has it.
   const otTreasuryFeeDest = poolState.hasOtTreasury
     ? poolState.otTreasuryFeeDestination
     : undefined;

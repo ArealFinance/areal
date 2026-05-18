@@ -402,7 +402,7 @@ async function initializeOt(
 
 /**
  * Mint the initial SPRK supply to the deployer. Mirrors bootstrap-init.ts
- * `phaseArlMint` but for Sparkles. Skips if the SPRK supply on-chain is
+ * `phaseSprkMint` but for Sparkles. Skips if the SPRK supply on-chain is
  * already non-zero (idempotent re-runs).
  */
 async function mintInitialSupply(

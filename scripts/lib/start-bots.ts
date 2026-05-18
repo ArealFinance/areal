@@ -251,7 +251,7 @@ interface Artifact {
     futarchy: string;
   };
   mints?: {
-    arl_ot_mint?: string;
+    sprk_ot_mint?: string;
   };
   pdas?: {
     yd_dist_config?: string;
@@ -636,7 +636,7 @@ async function fundBots(
 
 /**
  * On-chain liveness probe for the merkle-publisher. Reads the YD
- * MerkleDistributor PDA for ARL OT and returns true iff `merkle_root`
+ * MerkleDistributor PDA for SPRK OT and returns true iff `merkle_root`
  * (offset 104, size 32) is non-zero. Returns false if the account is
  * missing, too small, or the bytes are all zero.
  *
@@ -657,7 +657,7 @@ async function fundBots(
  * has reached at least one full publish cycle.
  *
  * @param conn               Solana RPC connection (any commitment).
- * @param ydDistributorPda   The YD MerkleDistributor PDA for ARL OT (lives
+ * @param ydDistributorPda   The YD MerkleDistributor PDA for SPRK OT (lives
  *                           at art.ots[0].yd_distributor_pda).
  * @param ydProgramId        The YD program ID (read from
  *                           art.programs.yield_distribution).
@@ -942,14 +942,14 @@ async function startStage2(
     return [];
   }
 
-  const arlOt = art.ots?.[0];
-  if (!arlOt?.yd_distributor_pda) {
+  const sprkOt = art.ots?.[0];
+  if (!sprkOt?.yd_distributor_pda) {
     throw new Error(
       `phase-8 FATAL: artifact.ots[0].yd_distributor_pda missing — ` +
         `Layer 9 publisher dependencies not set up. R-C wait would have no PDA to poll.`,
     );
   }
-  const ydDistributorPda = new PublicKey(arlOt.yd_distributor_pda);
+  const ydDistributorPda = new PublicKey(sprkOt.yd_distributor_pda);
   const ydProgramId = new PublicKey(art.programs.yield_distribution);
 
   // D33 ordering. We chain spawns sequentially so an early failure halts

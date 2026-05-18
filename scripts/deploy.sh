@@ -12,7 +12,7 @@
 #  R20. Optional 3-contract mint-pin migration + redeploy (post-deploy, pre-state-init)
 #       (yield-distribution full RWT+USDC; native-dex + ownership-token RWT-only)
 #   2. Initialize singletons (DEX/RWT/YD config)              [phaseE prefix]
-#   3. ARL OT bootstrap (init, Futarchy, YD distributor, mint) [bootstrap-init.ts]
+#   3. SPRK OT bootstrap (init, Futarchy, YD distributor, mint) [bootstrap-init.ts]
 #   4. DEX pools (StandardCurve + concentrated) + initial LP  [bootstrap-init.ts]
 #   5. Initialize Nexus                                       [phaseNexus]
 #   6. Register bot wallets                                   [bootstrap-init.ts]
@@ -69,16 +69,16 @@ phase_2_singletons() {
 }
 
 # ----------------------------------------------------------------------------
-# Phase 3: ARL OT bootstrap.
+# Phase 3: SPRK OT bootstrap.
 #   Layer 10 substep 2 — covered by bootstrap-init.ts phases:
-#     - phaseFutarchy           (initialize_futarchy for ARL OT)
-#     - phaseArlDistributor     (vesting-period verification)
+#     - phaseFutarchy           (initialize_futarchy for SPRK OT)
+#     - phaseSprkDistributor    (vesting-period verification)
 #     - phaseDestinations       (batch_update_destinations 70/20/10)
-#     - phaseArlMint            (mint_ot initial supply, BEFORE Phase 7)
+#     - phaseSprkMint           (mint_ot initial supply, BEFORE Phase 7)
 # ----------------------------------------------------------------------------
-phase_3_arl_bootstrap() {
-  log "=== Phase 3: ARL OT bootstrap ==="
-  log "(covered by phaseFutarchy / phaseDestinations / phaseArlMint in scripts/lib/bootstrap-init.ts)"
+phase_3_sprk_bootstrap() {
+  log "=== Phase 3: SPRK OT bootstrap ==="
+  log "(covered by phaseFutarchy / phaseDestinations / phaseSprkMint in scripts/lib/bootstrap-init.ts)"
 }
 
 # ----------------------------------------------------------------------------
@@ -86,11 +86,11 @@ phase_3_arl_bootstrap() {
 #   Layer 10 substep 2 — covered by bootstrap-init.ts phases:
 #     - ensureDeployerPoolCreator (update_pool_creators ADD deployer)
 #     - phaseMasterPool           (RWT/USDC concentrated, bin_step=10, SD-4)
-#     - phaseArlRwtPool           (ARL_OT/RWT StandardCurve, OT-pair fee)
+#     - phaseSprkRwtPool          (SPRK_OT/RWT StandardCurve, OT-pair fee)
 # ----------------------------------------------------------------------------
 phase_4_dex_pools() {
   log "=== Phase 4: DEX pools + initial LP ==="
-  log "(covered by phaseMasterPool / phaseArlRwtPool in scripts/lib/bootstrap-init.ts)"
+  log "(covered by phaseMasterPool / phaseSprkRwtPool in scripts/lib/bootstrap-init.ts)"
 }
 
 # ----------------------------------------------------------------------------
@@ -319,7 +319,7 @@ main() {
   # the abort-and-redeploy recovery path is loss-free.
   phase_r20_migrate
   phase_2_singletons
-  phase_3_arl_bootstrap
+  phase_3_sprk_bootstrap
   phase_4_dex_pools
   phase_5_nexus
   phase_6_bot_registration

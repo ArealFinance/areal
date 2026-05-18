@@ -91,7 +91,7 @@ All 6 bots are spawned in Phase 8 of `scripts/deploy.sh` after the authority cha
 |---|---|---|
 | 1 | Deploy 5 contracts at vanity IDs | `.so` artifacts live on-chain |
 | 2 | R20 RWT mint pin migration | YD program rebuilt with the canonical RWT mint pinned (compile-time tripwire) |
-| 3 | ARL OT initialisation + revenue/distributor wiring | Singletons + ARL OT distributor seeded |
+| 3 | SPRK OT initialisation + revenue/distributor wiring | Singletons + SPRK OT distributor seeded |
 | 4 | DEX pool creation (RWT/USDC + auxiliary) | Master pool live, Nexus deposit/withdraw routes resolvable |
 | 5 | Liquidity Nexus initialisation | Nexus singleton + manager rotation prepared |
 | 6 | Bot wallet provisioning | 6 keypair files + airdrops |

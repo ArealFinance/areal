@@ -8,10 +8,10 @@
  *
  *   1. R-B precheck (defensive)
  *      Before issuing ANY propose ix, verifies (a) deployer is still the
- *      OtGovernance authority, and (b) the deployer's ARL OT ATA holds the
+ *      OtGovernance authority, and (b) the deployer's SPRK OT ATA holds the
  *      initial supply. If either is false, the run aborts loud — the cost
  *      of a false alarm is a 5-second human eyeball; the cost of a missed
- *      check is a permanently-unmintable ARL supply.
+ *      check is a permanently-unmintable SPRK supply.
  *
  *   2. Idempotency (per-step on-chain read BEFORE attempt)
  *      Each step reads the current authority field; if it already matches
@@ -93,8 +93,8 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xW
 const DEFAULT_ARTIFACT_PATH = join(REPO_ROOT, 'data', 'e2e-bootstrap.json');
 const DEFAULT_MAX_RETRIES = 3;
 
-/** ARL OT lives at index 0 of the artifact's `ots[]` array (mirrors bootstrap-init.ts). */
-const ARL_OT_INDEX = 0;
+/** SPRK OT lives at index 0 of the artifact's `ots[]` array (mirrors bootstrap-init.ts). */
+const SPRK_OT_INDEX = 0;
 
 // Authority field offsets (mirrors zero-authority-audit.ts; we re-import the
 // helper but also need the same offsets for in-flight reads in this module).
@@ -166,7 +166,7 @@ interface Artifact {
     futarchy: string;
   };
   mints?: {
-    arl_ot_mint?: string;
+    sprk_ot_mint?: string;
   };
   pdas?: {
     dex_config?: string;
@@ -554,12 +554,12 @@ interface PlannedAction {
 // R-B precheck
 // --------------------------------------------------------------------------
 
-const ARL_INITIAL_SUPPLY_MIN = 1n; // any non-zero balance proves mint_ot ran
+const SPRK_INITIAL_SUPPLY_MIN = 1n; // any non-zero balance proves mint_ot ran
 
 /**
  * Defensive R-B precheck — runs FIRST, before any transfer ix. Aborts loud
  * if (a) the deployer is no longer the OtGovernance authority, or (b) the
- * deployer's ARL OT ATA is empty (initial supply not minted, mint_ot would
+ * deployer's SPRK OT ATA is empty (initial supply not minted, mint_ot would
  * fail post-transfer because of the `has_one = authority` constraint).
  *
  * The check uses the explicit byte-offset path (not the audit helper) so a
@@ -577,15 +577,15 @@ async function runRbPrecheck(
       `phase-7 FATAL: artifact has no OTs — phaseOts did not run (R-B violation precondition)`,
     );
   }
-  const arlOt = art.ots[ARL_OT_INDEX];
-  if (!arlOt) {
+  const sprkOt = art.ots[SPRK_OT_INDEX];
+  if (!sprkOt) {
     throw new Error(
-      `phase-7 FATAL: artifact.ots[${ARL_OT_INDEX}] missing — ARL OT not bootstrapped`,
+      `phase-7 FATAL: artifact.ots[${SPRK_OT_INDEX}] missing — SPRK OT not bootstrapped`,
     );
   }
 
   // (a) OtGovernance.authority MUST equal deployer.publicKey.
-  const otGov = new PublicKey(arlOt.ot_governance_pda);
+  const otGov = new PublicKey(sprkOt.ot_governance_pda);
   const govAuthBytes = await readAuthorityField(
     conn,
     otGov,
@@ -607,45 +607,45 @@ async function runRbPrecheck(
   }
   log(stage, `OtGovernance.authority == deployer (OK)`);
 
-  // (b) ARL OT total supply MUST be > 0 — phaseArlMint must have run.
-  // SD-34: Originally this read `findAta(deployer.publicKey, arlMint)` and
+  // (b) SPRK OT total supply MUST be > 0 — phaseSprkMint must have run.
+  // SD-34: Originally this read `findAta(deployer.publicKey, sprkMint)` and
   // expected the balance there to exceed the threshold. That assumption was
-  // wrong by design — phaseArlMint mints via OT::mint_ot to the OT-contract-
-  // controlled mint at art.ots[ARL_OT_INDEX].ot_mint (created in phase-g),
-  // NOT to art.mints.arl_ot_mint (which is a USDC-decimal placeholder from
-  // phase-a, never used as the live ARL). Replace the deployer-ATA check
+  // wrong by design — phaseSprkMint mints via OT::mint_ot to the OT-contract-
+  // controlled mint at art.ots[SPRK_OT_INDEX].ot_mint (created in phase-g),
+  // NOT to art.mints.sprk_ot_mint (which is a USDC-decimal placeholder from
+  // phase-a, never used as the live SPRK). Replace the deployer-ATA check
   // with a Mint.supply read on the correct mint pubkey — the semantically
-  // correct way to assert "phaseArlMint produced supply".
-  const arlOtRecord = art.ots?.[ARL_OT_INDEX];
-  if (!arlOtRecord?.ot_mint) {
+  // correct way to assert "phaseSprkMint produced supply".
+  const sprkOtRecord = art.ots?.[SPRK_OT_INDEX];
+  if (!sprkOtRecord?.ot_mint) {
     throw new Error(
-      `phase-7 FATAL: artifact.ots[${ARL_OT_INDEX}].ot_mint missing — ARL OT not created (phase-g)`,
+      `phase-7 FATAL: artifact.ots[${SPRK_OT_INDEX}].ot_mint missing — SPRK OT not created (phase-g)`,
     );
   }
-  const arlMint = new PublicKey(arlOtRecord.ot_mint);
-  const mintInfo = await conn.getAccountInfo(arlMint);
+  const sprkMint = new PublicKey(sprkOtRecord.ot_mint);
+  const mintInfo = await conn.getAccountInfo(sprkMint);
   if (!mintInfo) {
     throw new Error(
-      `phase-7 FATAL: ARL mint ${arlMint.toBase58()} not on-chain — phaseArlMint did not run`,
+      `phase-7 FATAL: SPRK mint ${sprkMint.toBase58()} not on-chain — phaseSprkMint did not run`,
     );
   }
   // SPL Mint layout: 0..36 mint_authority(36), 36..44 supply(u64 LE),
   //                  44 decimals(u8), 45 is_initialized(u8), 46..82 freeze_auth(36).
   if (mintInfo.data.length < 44) {
     throw new Error(
-      `phase-7 FATAL: ARL mint ${arlMint.toBase58()} data length=${mintInfo.data.length} ` +
+      `phase-7 FATAL: SPRK mint ${sprkMint.toBase58()} data length=${mintInfo.data.length} ` +
         `(expected ≥44 for SPL Mint layout)`,
     );
   }
   const supply = mintInfo.data.readBigUInt64LE(36);
-  if (supply < ARL_INITIAL_SUPPLY_MIN) {
+  if (supply < SPRK_INITIAL_SUPPLY_MIN) {
     throw new Error(
-      `phase-7 FATAL: ARL OT total supply=${supply.toString()} < threshold ` +
-        `${ARL_INITIAL_SUPPLY_MIN.toString()} — phaseArlMint did not run; R-B violation. ` +
+      `phase-7 FATAL: SPRK OT total supply=${supply.toString()} < threshold ` +
+        `${SPRK_INITIAL_SUPPLY_MIN.toString()} — phaseSprkMint did not run; R-B violation. ` +
         `Authority transfer would permanently strand the mint authority on Futarchy.`,
     );
   }
-  log(stage, `ARL OT total supply=${supply.toString()} (OK)`);
+  log(stage, `SPRK OT total supply=${supply.toString()} (OK)`);
 
   // (c) SEC-42 — extend the precheck to read all 5 deployer-as-authority
   // states. The dual of `assertAuthorityChainComplete`: deployer-as-authority
@@ -695,27 +695,27 @@ async function transferOtToFutarchy(
 ): Promise<void> {
   const stage = 'step-1+2-ot-to-futarchy';
 
-  const arlOt = art.ots?.[ARL_OT_INDEX];
-  if (!arlOt) throw new Error(`${stage}: ARL OT missing in artifact`);
-  if (!arlOt.futarchy_config_pda) {
+  const sprkOt = art.ots?.[SPRK_OT_INDEX];
+  if (!sprkOt) throw new Error(`${stage}: SPRK OT missing in artifact`);
+  if (!sprkOt.futarchy_config_pda) {
     throw new Error(
-      `${stage}: arlOt.futarchy_config_pda missing — phaseFutarchy did not run`,
+      `${stage}: sprkOt.futarchy_config_pda missing — phaseFutarchy did not run`,
     );
   }
-  // SD-34 follow-up: the live ARL OT mint is at arlOt.ot_mint (created in
-  // bootstrap-init phase-g), NOT at art.mints.arl_ot_mint (which is a
+  // SD-34 follow-up: the live SPRK OT mint is at sprkOt.ot_mint (created in
+  // bootstrap-init phase-g), NOT at art.mints.sprk_ot_mint (which is a
   // USDC-decimal placeholder created in phase-a and never used as the live
-  // ARL). The contract derives ot_governance PDA from this mint pubkey, so
+  // SPRK). The contract derives ot_governance PDA from this mint pubkey, so
   // mixing the two produces "PDA mismatch for 'ot_governance'".
-  if (!arlOt.ot_mint) {
-    throw new Error(`${stage}: arlOt.ot_mint missing — phase-g did not run`);
+  if (!sprkOt.ot_mint) {
+    throw new Error(`${stage}: sprkOt.ot_mint missing — phase-g did not run`);
   }
 
   const otProgramId = new PublicKey(art.programs.ownership_token);
   const futProgramId = new PublicKey(art.programs.futarchy);
-  const arlMint = new PublicKey(arlOt.ot_mint);
-  const otGovPda = new PublicKey(arlOt.ot_governance_pda);
-  const futConfigPda = new PublicKey(arlOt.futarchy_config_pda);
+  const sprkMint = new PublicKey(sprkOt.ot_mint);
+  const otGovPda = new PublicKey(sprkOt.ot_governance_pda);
+  const futConfigPda = new PublicKey(sprkOt.futarchy_config_pda);
 
   // Idempotency — if OtGovernance.authority is already futConfigPda, skip.
   const currentAuth = await readAuthorityField(
@@ -766,7 +766,7 @@ async function transferOtToFutarchy(
         {
           accounts: {
             authority: deployer.publicKey,
-            ot_mint: arlMint,
+            ot_mint: sprkMint,
             ot_governance: otGovPda,
           },
           args: { new_authority: Array.from(futConfigPda.toBytes()) },
@@ -779,7 +779,7 @@ async function transferOtToFutarchy(
             executor: deployer.publicKey,
             config: futConfigPda,
             ot_governance: otGovPda,
-            ot_mint: arlMint,
+            ot_mint: sprkMint,
             ot_program: otProgramId,
           },
           args: {},
@@ -822,14 +822,14 @@ async function transferFutarchyToMultisig(
 ): Promise<void> {
   const stage = 'step-3+4-futarchy-to-multisig';
 
-  const arlOt = art.ots?.[ARL_OT_INDEX];
-  if (!arlOt) throw new Error(`${stage}: ARL OT missing in artifact`);
-  if (!arlOt.futarchy_config_pda) {
-    throw new Error(`${stage}: arlOt.futarchy_config_pda missing`);
+  const sprkOt = art.ots?.[SPRK_OT_INDEX];
+  if (!sprkOt) throw new Error(`${stage}: SPRK OT missing in artifact`);
+  if (!sprkOt.futarchy_config_pda) {
+    throw new Error(`${stage}: sprkOt.futarchy_config_pda missing`);
   }
 
   const futProgramId = new PublicKey(art.programs.futarchy);
-  const futConfigPda = new PublicKey(arlOt.futarchy_config_pda);
+  const futConfigPda = new PublicKey(sprkOt.futarchy_config_pda);
   const target = opts.multisigPubkey;
 
   // Idempotency — if FutarchyConfig.authority already = multisig, skip.

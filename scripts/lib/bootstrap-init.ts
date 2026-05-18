@@ -7,13 +7,13 @@
  * from data/e2e-bootstrap.json (already populated by stages 1-5) and runs
  * the seven init phases:
  *
- *   a) Test mints                : USDC test mint, ARL OT mint
+ *   a) Test mints                : USDC test mint, SPRK OT mint
  *   b) Singleton configs         : DEX initialize_dex, YD initialize_config
  *   c) RWT vault                 : RWT::initialize_vault (mint authority -> vault PDA)
  *   d) YD liquidity holding      : YD::initialize_liquidity_holding (best-effort)
  *   e) DEX Liquidity Nexus       : DEX::initialize_nexus (best-effort, Layer 9)
  *   f) Master RWT/USDC pool      : DEX::create_pool + add_liquidity
- *   g) Per-OT (count=OT_TEST_COUNT, default 3):
+ *   g) Per-OT (always creates SPRK at index 0 + OT_TEST_COUNT extras, default 0):
  *        OT::initialize_ot, YD::create_distributor, optional batch_update_destinations
  *   h) USDC supply mints to: deployer, publisher mock, accumulator USDC ATAs
  *
@@ -31,7 +31,7 @@
  * Usage:
  *   npx tsx scripts/lib/bootstrap-init.ts \
  *       [--artifact data/e2e-bootstrap.json] \
- *       [--ot-count 3]
+ *       [--ot-count 0]
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
@@ -65,7 +65,11 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xW
 const SYSTEM_PROGRAM_ID = new PublicKey('11111111111111111111111111111111');
 
 const DEFAULT_ARTIFACT_PATH = join(REPO_ROOT, 'data', 'e2e-bootstrap.json');
-const DEFAULT_OT_COUNT = parseInt(process.env.OT_TEST_COUNT ?? '3', 10);
+// Extra test OTs to create on top of the canonical SPRK OT (always created at
+// index 0). Default 0 means "SPRK only" — the user-facing token list is then
+// USDC + RWT + SPRK. Set OT_TEST_COUNT=N to provision N additional generic
+// test OTs (named "Test OT 1..N", symbols "TOT1..N") for harness scenarios.
+const DEFAULT_OT_COUNT = parseInt(process.env.OT_TEST_COUNT ?? '0', 10);
 
 /**
  * Substep 12 sec M-2 — secret-file split.
@@ -90,11 +94,11 @@ function secretsPathFor(artifactPath: string): string {
 /** Top-level artifact keys that contain secret material. */
 type SecretMintKey =
   | 'usdc_test_mint_keypair_b64'
-  | 'arl_ot_mint_keypair_b64'
+  | 'sprk_ot_mint_keypair_b64'
   | 'rwt_mint_keypair_b64';
 const SECRET_MINT_KEYS: ReadonlyArray<SecretMintKey> = [
   'usdc_test_mint_keypair_b64',
-  'arl_ot_mint_keypair_b64',
+  'sprk_ot_mint_keypair_b64',
   'rwt_mint_keypair_b64',
 ];
 
@@ -153,9 +157,9 @@ interface OtRecord {
   yd_accumulator_pda?: string;
   reward_vault?: string;
   accumulator_usdc_ata?: string;
-  // Layer 10 substep 2 — ARL OT bootstrap extras (Phase 3 plan §63-77).
-  // Populated only for the first OT (ARL) by phaseFutarchy / phaseDestinations
-  // / phaseArlMint. Optional so non-ARL test OTs keep the existing shape.
+  // Layer 10 substep 2 — SPRK OT bootstrap extras (Phase 3 plan §63-77).
+  // Populated only for the first OT (SPRK) by phaseFutarchy / phaseDestinations
+  // / phaseSprkMint. Optional so non-SPRK test OTs keep the existing shape.
   futarchy_config_pda?: string;
   treasury_usdc_ata?: string;
   destinations_set?: boolean;
@@ -184,8 +188,8 @@ interface Artifact {
   mints?: {
     usdc_test_mint: string;
     usdc_test_mint_keypair_b64: string;
-    arl_ot_mint?: string;
-    arl_ot_mint_keypair_b64?: string;
+    sprk_ot_mint?: string;
+    sprk_ot_mint_keypair_b64?: string;
     rwt_mint?: string;
     rwt_mint_keypair_b64?: string;
   };
@@ -221,7 +225,7 @@ interface Artifact {
     master_pool?: string;
     master_pool_vault_a?: string;
     master_pool_vault_b?: string;
-    // Layer 10 substep 2 — concentrated master pool BinArray PDA + ARL/RWT
+    // Layer 10 substep 2 — concentrated master pool BinArray PDA + SPRK/RWT
     // governance pool. The master pool now uses POOL_TYPE_CONCENTRATED (D40 +
     // SD-4); the bin array PDA is required for any subsequent add_liquidity /
     // swap CPI on it.
@@ -235,10 +239,10 @@ interface Artifact {
     // bootstrap's first `grow_liquidity` call. Diagnostic-only; the
     // pool-rebalancer bot reads this field directly from on-chain state.
     master_pool_last_rebalance_nav_bin?: string;
-    arl_rwt_pool?: string;
-    arl_rwt_pool_vault_a?: string;
-    arl_rwt_pool_vault_b?: string;
-    // Layer 10 substep 2 — Crank wallet USDC ATA used by ARL OT destinations
+    sprk_rwt_pool?: string;
+    sprk_rwt_pool_vault_a?: string;
+    sprk_rwt_pool_vault_b?: string;
+    // Layer 10 substep 2 — Crank wallet USDC ATA used by SPRK OT destinations
     // (10% Nexus-via-Crank slot per plan §74). This is an ATA owned by the
     // deployer keypair, NOT a separate crank wallet — devnet pseudo-multisig
     // pattern (D32). Mainnet runbook overrides this with a dedicated crank
@@ -775,7 +779,11 @@ function stringToFixedBytes(s: string, len: number): Uint8Array {
 // --------------------------------------------------------------------------
 
 async function phaseMints(conn: Connection, deployer: Keypair, art: Artifact): Promise<void> {
-  log('phase-a', 'creating test mints (USDC + ARL OT)');
+  log('phase-a', 'creating test mints (USDC + SPRK OT)');
+  // SPRK is the canonical Ownership Token created at index 0 by phaseOts.
+  // phase-a only seeds the mint keypair so phaseOts can reuse it via the
+  // artifact's `mints.sprk_ot_mint_keypair_b64` field (idempotent across
+  // warm restarts).
 
   // Reuse existing mints if artifact already has them (KEEP_LEDGER scenario).
   let usdcKp: Keypair;
@@ -796,8 +804,8 @@ async function phaseMints(conn: Connection, deployer: Keypair, art: Artifact): P
 
   let otKp: Keypair;
   let otCreated = false;
-  if (art.mints?.arl_ot_mint_keypair_b64) {
-    otKp = keypairFromB64(art.mints.arl_ot_mint_keypair_b64);
+  if (art.mints?.sprk_ot_mint_keypair_b64) {
+    otKp = keypairFromB64(art.mints.sprk_ot_mint_keypair_b64);
     const info = await conn.getAccountInfo(otKp.publicKey);
     if (!info) {
       const r = await ensureMint(conn, deployer, 6, otKp);
@@ -808,14 +816,14 @@ async function phaseMints(conn: Connection, deployer: Keypair, art: Artifact): P
     otKp = r.keypair;
     otCreated = r.created;
   }
-  log('phase-a', `arl_ot_mint=${otKp.publicKey.toBase58()}`, { created: otCreated });
+  log('phase-a', `sprk_ot_mint=${otKp.publicKey.toBase58()} (Sparkles)`, { created: otCreated });
 
   art.mints = {
     ...(art.mints ?? {}),
     usdc_test_mint: usdcKp.publicKey.toBase58(),
     usdc_test_mint_keypair_b64: keypairToB64(usdcKp),
-    arl_ot_mint: otKp.publicKey.toBase58(),
-    arl_ot_mint_keypair_b64: keypairToB64(otKp),
+    sprk_ot_mint: otKp.publicKey.toBase58(),
+    sprk_ot_mint_keypair_b64: keypairToB64(otKp),
   };
 }
 
@@ -1277,7 +1285,7 @@ async function phaseNexus(
   }
 }
 
-// Layer 10 substep 2 — pool seed + ARL bootstrap constants.
+// Layer 10 substep 2 — pool seed + SPRK bootstrap constants.
 //
 // The plan (§Phase 4) calls for a concentrated RWT/USDC pool with balanced
 // seed liquidity. We pick 10_000 USDC + 10_000 RWT (10_000_000_000 base units
@@ -1325,27 +1333,27 @@ const MASTER_POOL_NEXUS_SEED_USDC: bigint = parseSeedAmount(
   100_000_000n,
 );
 
-// ARL/RWT governance pool seed: smaller than master pool (governance pair sees
+// SPRK/RWT governance pool seed: smaller than master pool (governance pair sees
 // far less volume than the protocol's main RWT/USDC pair). 1_000 RWT + 1_000
-// ARL OT — balanced 50/50 split per plan §Phase 4 step 4.
-const ARL_RWT_POOL_SEED_RWT: bigint = parseSeedAmount(
-  'ARL_RWT_POOL_SEED_RWT_BASE',
+// SPRK OT — balanced 50/50 split per plan §Phase 4 step 4.
+const SPRK_RWT_POOL_SEED_RWT: bigint = parseSeedAmount(
+  'SPRK_RWT_POOL_SEED_RWT_BASE',
   1_000_000_000n,
 );
-const ARL_RWT_POOL_SEED_ARL: bigint = parseSeedAmount(
-  'ARL_RWT_POOL_SEED_ARL_BASE',
+const SPRK_RWT_POOL_SEED_SPRK: bigint = parseSeedAmount(
+  'SPRK_RWT_POOL_SEED_SPRK_BASE',
   1_000_000_000n,
 );
 
-// ARL OT bootstrap constants. Hoisted above phaseOts so phaseOts can specialize
-// the ARL OT distributor with the 365-day vesting period required by plan §70
+// SPRK OT bootstrap constants. Hoisted above phaseOts so phaseOts can specialize
+// the SPRK OT distributor with the 365-day vesting period required by plan §70
 // (the rest of the test OTs use the 1-day default).
-const ARL_OT_INDEX = 0; // First test OT becomes the ARL governance token.
-const ARL_VESTING_PERIOD_SECS = 31_536_000; // 365 days per plan §70.
-const DEFAULT_OT_VESTING_PERIOD_SECS = 86_400; // 1 day for non-ARL test OTs.
-const ARL_INITIAL_SUPPLY: bigint = parseSeedAmount(
-  'ARL_INITIAL_SUPPLY_BASE',
-  1_000_000_000_000n, // 1_000_000 ARL @ 6 decimals.
+const SPRK_OT_INDEX = 0; // First test OT becomes the SPRK (Sparkles) governance token.
+const SPRK_VESTING_PERIOD_SECS = 31_536_000; // 365 days per plan §70.
+const DEFAULT_OT_VESTING_PERIOD_SECS = 86_400; // 1 day for extra non-SPRK test OTs.
+const SPRK_INITIAL_SUPPLY: bigint = parseSeedAmount(
+  'SPRK_INITIAL_SUPPLY_BASE',
+  1_000_000_000_000n, // 1_000_000 SPRK @ 6 decimals.
 );
 
 // Concentrated pool parameters per layer-10 plan §86: bin_step=10 (0.1%),
@@ -1808,7 +1816,13 @@ async function ensureDeployerPoolCreator(
 }
 
 async function phaseOts(conn: Connection, deployer: Keypair, art: Artifact, count: number): Promise<void> {
-  log('phase-g', `creating ${count} test OT(s) + distributors`);
+  // `count` is the number of EXTRA test OTs requested via OT_TEST_COUNT.
+  // SPRK (Sparkles) is always created at index 0 — it is the canonical
+  // Ownership Token paired with RWT in the SPRK/RWT AMM pool. Extra test OTs
+  // (when count > 0) get generic names/symbols "Test OT N" / "TOTN" for
+  // harness scenarios.
+  const totalCount = count + 1;
+  log('phase-g', `creating ${totalCount} OT(s) (SPRK + ${count} test OT(s)) + distributors`);
 
   const otProgramId = new PublicKey(art.programs.ownership_token);
   const ydProgramId = new PublicKey(art.programs.yield_distribution);
@@ -1829,17 +1843,17 @@ async function phaseOts(conn: Connection, deployer: Keypair, art: Artifact, coun
   const existing: OtRecord[] = art.ots ?? [];
   const out: OtRecord[] = [...existing];
 
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < totalCount; i++) {
     let otKp: Keypair;
     const existingRec = existing[i];
     if (existingRec?.ot_mint_keypair_b64) {
       otKp = keypairFromB64(existingRec.ot_mint_keypair_b64);
-    } else if (i === ARL_OT_INDEX && art.mints?.arl_ot_mint_keypair_b64) {
-      // Reuse the ARL OT mint keypair created in phase-a so `ots[ARL_OT_INDEX].
-      // ot_mint === mints.arl_ot_mint`. Without this, scenario tests that
-      // resolve the ARL OT record via `ots.find(o => o.ot_mint === arl_ot_mint)`
+    } else if (i === SPRK_OT_INDEX && art.mints?.sprk_ot_mint_keypair_b64) {
+      // Reuse the SPRK OT mint keypair created in phase-a so `ots[SPRK_OT_INDEX].
+      // ot_mint === mints.sprk_ot_mint`. Without this, scenario tests that
+      // resolve the SPRK OT record via `ots.find(o => o.ot_mint === sprk_ot_mint)`
       // fail at lookup time (S1.2 + S1.9 — see layer-10-scenario-1-happy-path).
-      otKp = keypairFromB64(art.mints.arl_ot_mint_keypair_b64);
+      otKp = keypairFromB64(art.mints.sprk_ot_mint_keypair_b64);
     } else {
       otKp = Keypair.generate();
     }
@@ -1892,9 +1906,25 @@ async function phaseOts(conn: Connection, deployer: Keypair, art: Artifact, coun
             ata_program: ASSOCIATED_TOKEN_PROGRAM_ID,
           },
           args: {
-            name: Array.from(stringToFixedBytes(`Test OT ${i}`, 32)),
-            symbol: Array.from(stringToFixedBytes(`TOT${i}`, 10)),
-            uri: Array.from(stringToFixedBytes(`https://test.areal.finance/tot${i}`, 200)),
+            // SPRK (index 0) is the canonical Ownership Token — name + symbol
+            // are surfaced to the UI via SDK markets snapshot, so they must be
+            // the user-facing label. Extra test OTs (index > 0) keep generic
+            // names so harness scenarios don't accidentally collide with the
+            // SPRK identity.
+            name: Array.from(
+              stringToFixedBytes(i === SPRK_OT_INDEX ? 'Sparkles' : `Test OT ${i}`, 32),
+            ),
+            symbol: Array.from(
+              stringToFixedBytes(i === SPRK_OT_INDEX ? 'SPRK' : `TOT${i}`, 10),
+            ),
+            uri: Array.from(
+              stringToFixedBytes(
+                i === SPRK_OT_INDEX
+                  ? 'https://areal.finance/sprk'
+                  : `https://test.areal.finance/tot${i}`,
+                200,
+              ),
+            ),
             initial_authority: Array.from(deployer.publicKey.toBytes()),
           },
         });
@@ -1938,12 +1968,12 @@ async function phaseOts(conn: Connection, deployer: Keypair, art: Artifact, coun
         try {
           const ydConfigPda = new PublicKey(art.pdas.yd_dist_config);
           const ydClient = new ArlexClient(loadIdlForClient('yield-distribution'), ydProgramId, conn);
-          // A-14 — ARL OT (index ARL_OT_INDEX) gets the 365-day vesting period
+          // A-14 — SPRK OT (index SPRK_OT_INDEX) gets the 365-day vesting period
           // required by plan §70. Every other test OT uses the 1-day default.
-          // phaseArlDistributor downstream verifies the on-chain vesting matches
+          // phaseSprkDistributor downstream verifies the on-chain vesting matches
           // plan §70 and FAILS LOUDLY on mismatch.
           const vestingSecs =
-            i === ARL_OT_INDEX ? ARL_VESTING_PERIOD_SECS : DEFAULT_OT_VESTING_PERIOD_SECS;
+            i === SPRK_OT_INDEX ? SPRK_VESTING_PERIOD_SECS : DEFAULT_OT_VESTING_PERIOD_SECS;
           const tx = ydClient.buildTransaction('create_distributor', {
             accounts: {
               authority: deployer.publicKey,
@@ -2053,29 +2083,29 @@ async function phaseUsdcSupply(
 }
 
 // ===========================================================================
-// Layer 10 substep 2 — ARL OT bootstrap (Phase 3 plan §63-77)
+// Layer 10 substep 2 — SPRK OT bootstrap (Phase 3 plan §63-77)
 // ===========================================================================
 //
 // Phase 3 of the layer-10 plan calls for 6 steps after Phase 2 / Phase 5:
-//   1. Create ARL SPL Mint                  (already in phaseMints)
+//   1. Create SPRK SPL Mint                 (already in phaseMints)
 //   2. OT::initialize_ot                    (already in phaseOts step 2)
 //   3. Futarchy::initialize_futarchy        (← phaseFutarchy below)
 //   4. YD::create_distributor               (already in phaseOts step 3)
 //   5. OT::batch_update_destinations 70/20/10 (← phaseDestinations below)
-//   6. OT::mint_ot(initial_supply)          (← phaseArlMint below)
+//   6. OT::mint_ot(initial_supply)          (← phaseSprkMint below)
 //
 // `phaseOts` covers steps 1, 2, 4 for every test OT. Layer 10 substep 2
-// specializes ots[ARL_OT_INDEX] inside phaseOts itself by passing the 365-day
-// vesting_period_secs (constant ARL_VESTING_PERIOD_SECS hoisted alongside the
-// pool seed amounts). phaseArlDistributor below verifies the on-chain vesting
-// matches plan §70 and FAILS LOUDLY on mismatch. The remaining ARL-specific
+// specializes ots[SPRK_OT_INDEX] inside phaseOts itself by passing the 365-day
+// vesting_period_secs (constant SPRK_VESTING_PERIOD_SECS hoisted alongside the
+// pool seed amounts). phaseSprkDistributor below verifies the on-chain vesting
+// matches plan §70 and FAILS LOUDLY on mismatch. The remaining SPRK-specific
 // phases live below: Futarchy init, destinations 70/20/10, initial supply
 // mint.
 //
 // HARD CONSTRAINT (plan line 79 + R-B): mint_ot MUST run before Phase 7.
 // After Futarchy claims OT governance, deployer cannot mint anymore. The
-// orchestration in `main()` enforces this by calling phaseArlMint before
-// any authority-transfer phase (substep 3 wires that). phaseArlMint also
+// orchestration in `main()` enforces this by calling phaseSprkMint before
+// any authority-transfer phase (substep 3 wires that). phaseSprkMint also
 // runs a defensive precheck that the deployer is still OT governance
 // authority and aborts the run if not (SEC-23).
 
@@ -2084,15 +2114,15 @@ async function phaseFutarchy(
   deployer: Keypair,
   art: Artifact,
 ): Promise<void> {
-  log('phase-i', 'initializing Futarchy for ARL OT');
+  log('phase-i', 'initializing Futarchy for SPRK OT');
 
   if (!art.ots || art.ots.length === 0) {
     warn('phase-i', 'no OTs in artifact; skipping Futarchy init');
     return;
   }
-  const arlOt = art.ots[ARL_OT_INDEX];
-  if (!arlOt) {
-    warn('phase-i', `ots[${ARL_OT_INDEX}] missing; skipping Futarchy init`);
+  const sprkOt = art.ots[SPRK_OT_INDEX];
+  if (!sprkOt) {
+    warn('phase-i', `ots[${SPRK_OT_INDEX}] missing; skipping Futarchy init`);
     return;
   }
 
@@ -2107,18 +2137,18 @@ async function phaseFutarchy(
     return;
   }
 
-  const arlMint = new PublicKey(arlOt.ot_mint);
-  const otGovernancePda = new PublicKey(arlOt.ot_governance_pda);
+  const sprkMint = new PublicKey(sprkOt.ot_mint);
+  const otGovernancePda = new PublicKey(sprkOt.ot_governance_pda);
 
   const [futarchyConfigPda] = findPda(
-    [Buffer.from('futarchy_config'), arlMint.toBuffer()],
+    [Buffer.from('futarchy_config'), sprkMint.toBuffer()],
     futProgramId,
   );
 
   const existing = await conn.getAccountInfo(futarchyConfigPda);
   if (existing) {
-    log('phase-i', `Futarchy already initialized for ARL (config=${futarchyConfigPda.toBase58()})`);
-    arlOt.futarchy_config_pda = futarchyConfigPda.toBase58();
+    log('phase-i', `Futarchy already initialized for SPRK (config=${futarchyConfigPda.toBase58()})`);
+    sprkOt.futarchy_config_pda = futarchyConfigPda.toBase58();
     return;
   }
 
@@ -2127,7 +2157,7 @@ async function phaseFutarchy(
     const tx = futClient.buildTransaction('initialize_futarchy', {
       accounts: {
         deployer: deployer.publicKey,
-        ot_mint: arlMint,
+        ot_mint: sprkMint,
         ot_governance: otGovernancePda,
         config: futarchyConfigPda,
         system_program: SYSTEM_PROGRAM_ID,
@@ -2135,7 +2165,7 @@ async function phaseFutarchy(
       args: {},
     });
     await sendAndConfirm(conn, tx, [deployer]);
-    arlOt.futarchy_config_pda = futarchyConfigPda.toBase58();
+    sprkOt.futarchy_config_pda = futarchyConfigPda.toBase58();
     log('phase-i', `Futarchy::initialize_futarchy OK (config=${futarchyConfigPda.toBase58()})`);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -2147,13 +2177,13 @@ async function phaseFutarchy(
   }
 }
 
-async function phaseArlDistributor(
+async function phaseSprkDistributor(
   conn: Connection,
   _deployer: Keypair,
   art: Artifact,
 ): Promise<void> {
-  // A-14 — verification only. phaseOts now creates the ARL OT distributor with
-  // ARL_VESTING_PERIOD_SECS already (no recreation possible mid-run anyway —
+  // A-14 — verification only. phaseOts now creates the SPRK OT distributor with
+  // SPRK_VESTING_PERIOD_SECS already (no recreation possible mid-run anyway —
   // close_distributor is a separate authority path). This phase reads the
   // on-chain `vesting_period_secs` field and FAILS LOUDLY if it doesn't match
   // plan §70.
@@ -2174,38 +2204,38 @@ async function phaseArlDistributor(
   //   192 is_active          bool       offset 192
   //   193 bump               u8         offset 193
   if (!art.ots || art.ots.length === 0) return;
-  const arlOt = art.ots[ARL_OT_INDEX];
-  if (!arlOt?.yd_distributor_pda) {
-    log('phase-i', 'ARL distributor not yet created; skipping vesting verification');
+  const sprkOt = art.ots[SPRK_OT_INDEX];
+  if (!sprkOt?.yd_distributor_pda) {
+    log('phase-i', 'SPRK distributor not yet created; skipping vesting verification');
     return;
   }
-  const distInfo = await conn.getAccountInfo(new PublicKey(arlOt.yd_distributor_pda));
+  const distInfo = await conn.getAccountInfo(new PublicKey(sprkOt.yd_distributor_pda));
   if (!distInfo) {
-    log('phase-i', 'ARL distributor account missing; skipping vesting verification');
+    log('phase-i', 'SPRK distributor account missing; skipping vesting verification');
     return;
   }
   const VESTING_PERIOD_SECS_OFFSET = 8 + 32 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8;
   if (distInfo.data.length < VESTING_PERIOD_SECS_OFFSET + 8) {
     throw new Error(
-      `phase-i FATAL: ARL distributor account too small ` +
+      `phase-i FATAL: SPRK distributor account too small ` +
         `(${distInfo.data.length} bytes, need >= ${VESTING_PERIOD_SECS_OFFSET + 8}) — IDL drift?`,
     );
   }
   // i64 little-endian. readBigInt64LE returns bigint.
   const onChainVesting = distInfo.data.readBigInt64LE(VESTING_PERIOD_SECS_OFFSET);
-  const expected = BigInt(ARL_VESTING_PERIOD_SECS);
+  const expected = BigInt(SPRK_VESTING_PERIOD_SECS);
   if (onChainVesting !== expected) {
     throw new Error(
-      `phase-i FATAL: ARL distributor vesting_period_secs=${onChainVesting.toString()}s ` +
+      `phase-i FATAL: SPRK distributor vesting_period_secs=${onChainVesting.toString()}s ` +
         `but plan §70 requires ${expected.toString()}s (365 days). ` +
-        `phaseOts must specialize ARL OT (index ${ARL_OT_INDEX}) — ` +
-        `check the i===ARL_OT_INDEX branch in phaseOts. ` +
+        `phaseOts must specialize SPRK OT (index ${SPRK_OT_INDEX}) — ` +
+        `check the i===SPRK_OT_INDEX branch in phaseOts. ` +
         `Existing distributor cannot be patched in-place; restart with KEEP_LEDGER=0.`,
     );
   }
   log(
     'phase-i',
-    `ARL distributor vesting verified: ${onChainVesting.toString()}s (plan §70 OK)`,
+    `SPRK distributor vesting verified: ${onChainVesting.toString()}s (plan §70 OK)`,
   );
 }
 
@@ -2214,25 +2244,25 @@ async function phaseDestinations(
   deployer: Keypair,
   art: Artifact,
 ): Promise<void> {
-  log('phase-j', 'configuring ARL OT revenue destinations (70/20/10)');
+  log('phase-j', 'configuring SPRK OT revenue destinations (70/20/10)');
 
   if (!art.ots || art.ots.length === 0) {
     warn('phase-j', 'no OTs in artifact; skipping destinations');
     return;
   }
-  const arlOt = art.ots[ARL_OT_INDEX];
-  if (!arlOt) {
-    warn('phase-j', `ots[${ARL_OT_INDEX}] missing; skipping destinations`);
+  const sprkOt = art.ots[SPRK_OT_INDEX];
+  if (!sprkOt) {
+    warn('phase-j', `ots[${SPRK_OT_INDEX}] missing; skipping destinations`);
     return;
   }
-  if (arlOt.destinations_set === true) {
-    log('phase-j', 'ARL destinations already configured (artifact flag); skipping');
+  if (sprkOt.destinations_set === true) {
+    log('phase-j', 'SPRK destinations already configured (artifact flag); skipping');
     return;
   }
-  if (!arlOt.accumulator_usdc_ata) {
+  if (!sprkOt.accumulator_usdc_ata) {
     warn(
       'phase-j',
-      'ARL accumulator_usdc_ata missing — phaseOts/create_distributor likely did not run',
+      'SPRK accumulator_usdc_ata missing — phaseOts/create_distributor likely did not run',
     );
     return;
   }
@@ -2253,18 +2283,18 @@ async function phaseDestinations(
   }
 
   const usdcMint = new PublicKey(art.mints.usdc_test_mint);
-  const arlMint = new PublicKey(arlOt.ot_mint);
-  const otGovernancePda = new PublicKey(arlOt.ot_governance_pda);
-  const revenueConfigPda = new PublicKey(arlOt.revenue_config_pda);
+  const sprkMint = new PublicKey(sprkOt.ot_mint);
+  const otGovernancePda = new PublicKey(sprkOt.ot_governance_pda);
+  const revenueConfigPda = new PublicKey(sprkOt.revenue_config_pda);
 
   // Destination 1: YD accumulator USDC ATA (already created by phaseOts via
   // create_distributor CPI).
-  const ydAccUsdcAta = new PublicKey(arlOt.accumulator_usdc_ata);
+  const ydAccUsdcAta = new PublicKey(sprkOt.accumulator_usdc_ata);
 
   // Destination 2: OT treasury USDC ATA (owned by ot_treasury PDA).
-  const otTreasuryPda = new PublicKey(arlOt.ot_treasury_pda);
+  const otTreasuryPda = new PublicKey(sprkOt.ot_treasury_pda);
   const treasuryUsdcAta = await ensureAta(conn, deployer, usdcMint, otTreasuryPda);
-  arlOt.treasury_usdc_ata = treasuryUsdcAta.toBase58();
+  sprkOt.treasury_usdc_ata = treasuryUsdcAta.toBase58();
 
   // Destination 3: Crank wallet USDC ATA. SEC-24 — the deployer key is the
   // mainnet root and must NEVER be hot-funded with revenue, so non-localhost
@@ -2343,17 +2373,17 @@ async function phaseDestinations(
     const tx = otClient.buildTransaction('batch_update_destinations', {
       accounts: {
         authority: deployer.publicKey,
-        ot_mint: arlMint,
+        ot_mint: sprkMint,
         ot_governance: otGovernancePda,
         revenue_config: revenueConfigPda,
       },
       args: { destinations },
     });
     await sendAndConfirm(conn, tx, [deployer]);
-    arlOt.destinations_set = true;
+    sprkOt.destinations_set = true;
     log(
       'phase-j',
-      `ARL destinations set 70/20/10 (yd=${ydAccUsdcAta.toBase58()}, treasury=${treasuryUsdcAta.toBase58()}, crank=${crankUsdcAta.toBase58()})`,
+      `SPRK destinations set 70/20/10 (yd=${ydAccUsdcAta.toBase58()}, treasury=${treasuryUsdcAta.toBase58()}, crank=${crankUsdcAta.toBase58()})`,
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -2365,20 +2395,20 @@ async function phaseDestinations(
   }
 }
 
-async function phaseArlMint(
+async function phaseSprkMint(
   conn: Connection,
   deployer: Keypair,
   art: Artifact,
 ): Promise<void> {
-  log('phase-k', `minting initial ARL OT supply (${ARL_INITIAL_SUPPLY.toString()} base units)`);
+  log('phase-k', `minting initial SPRK OT supply (${SPRK_INITIAL_SUPPLY.toString()} base units)`);
 
   if (!art.ots || art.ots.length === 0) {
-    warn('phase-k', 'no OTs in artifact; skipping ARL mint');
+    warn('phase-k', 'no OTs in artifact; skipping SPRK mint');
     return;
   }
-  const arlOt = art.ots[ARL_OT_INDEX];
-  if (!arlOt) {
-    warn('phase-k', `ots[${ARL_OT_INDEX}] missing; skipping ARL mint`);
+  const sprkOt = art.ots[SPRK_OT_INDEX];
+  if (!sprkOt) {
+    warn('phase-k', `ots[${SPRK_OT_INDEX}] missing; skipping SPRK mint`);
     return;
   }
 
@@ -2393,23 +2423,23 @@ async function phaseArlMint(
     return;
   }
 
-  const arlMint = new PublicKey(arlOt.ot_mint);
-  const otGovernancePda = new PublicKey(arlOt.ot_governance_pda);
-  const otConfigPda = new PublicKey(arlOt.ot_config_pda);
+  const sprkMint = new PublicKey(sprkOt.ot_mint);
+  const otGovernancePda = new PublicKey(sprkOt.ot_governance_pda);
+  const otConfigPda = new PublicKey(sprkOt.ot_config_pda);
 
   // Idempotency check 1: artifact flag.
-  if (arlOt.initial_supply_minted) {
-    log('phase-k', `ARL initial supply already minted (${arlOt.initial_supply_minted}); skipping`);
+  if (sprkOt.initial_supply_minted) {
+    log('phase-k', `SPRK initial supply already minted (${sprkOt.initial_supply_minted}); skipping`);
     return;
   }
 
-  // Idempotency check 2: deployer's ARL ATA balance. If it's already at-or-
+  // Idempotency check 2: deployer's SPRK ATA balance. If it's already at-or-
   // above the initial supply, treat the mint as done (warm-restart safety).
-  const recipientAta = await ensureAta(conn, deployer, arlMint, deployer.publicKey);
+  const recipientAta = await ensureAta(conn, deployer, sprkMint, deployer.publicKey);
   const balance = await getTokenBalance(conn, recipientAta);
-  if (balance >= ARL_INITIAL_SUPPLY) {
-    log('phase-k', `deployer ARL ATA balance ${balance.toString()} >= initial supply; skipping mint`);
-    arlOt.initial_supply_minted = ARL_INITIAL_SUPPLY.toString();
+  if (balance >= SPRK_INITIAL_SUPPLY) {
+    log('phase-k', `deployer SPRK ATA balance ${balance.toString()} >= initial supply; skipping mint`);
+    sprkOt.initial_supply_minted = SPRK_INITIAL_SUPPLY.toString();
     return;
   }
 
@@ -2417,7 +2447,7 @@ async function phaseArlMint(
   // and aborts the run if the deployer is no longer authority. mint_ot has
   // `has_one = authority`, so if Phase 7 has already transferred ownership to
   // Futarchy or Multisig, this call would fail with `OwnerMismatch` and the
-  // ARL initial supply would be permanently unmintable (R-B catastrophe).
+  // SPRK initial supply would be permanently unmintable (R-B catastrophe).
   //
   // OtGovernance layout (ownership-token/src/state.rs):
   //   0  discriminator        [u8; 8]
@@ -2451,7 +2481,7 @@ async function phaseArlMint(
         authority: deployer.publicKey,
         ot_governance: otGovernancePda,
         ot_config: otConfigPda,
-        ot_mint: arlMint,
+        ot_mint: sprkMint,
         recipient_token_account: recipientAta,
         recipient: deployer.publicKey,
         payer: deployer.publicKey,
@@ -2459,13 +2489,13 @@ async function phaseArlMint(
         system_program: SYSTEM_PROGRAM_ID,
         ata_program: ASSOCIATED_TOKEN_PROGRAM_ID,
       },
-      args: { amount: Number(ARL_INITIAL_SUPPLY) },
+      args: { amount: Number(SPRK_INITIAL_SUPPLY) },
     });
     await sendAndConfirm(conn, tx, [deployer]);
-    arlOt.initial_supply_minted = ARL_INITIAL_SUPPLY.toString();
+    sprkOt.initial_supply_minted = SPRK_INITIAL_SUPPLY.toString();
     log(
       'phase-k',
-      `OT::mint_ot OK (recipient=${recipientAta.toBase58()}, amount=${ARL_INITIAL_SUPPLY.toString()})`,
+      `OT::mint_ot OK (recipient=${recipientAta.toBase58()}, amount=${SPRK_INITIAL_SUPPLY.toString()})`,
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -2478,40 +2508,40 @@ async function phaseArlMint(
 }
 
 // ===========================================================================
-// Layer 10 substep 2 — ARL/RWT governance pool (Phase 4 plan §85)
+// Layer 10 substep 2 — SPRK/RWT governance pool (Phase 4 plan §85)
 // ===========================================================================
 //
-// Plan §Phase 4 step 2 calls for an ARL_OT/RWT StandardCurve pool. This is the
-// "OT pair with treasury fee" slot — when users swap ARL for RWT (or vice
+// Plan §Phase 4 step 2 calls for an SPRK_OT/RWT StandardCurve pool. This is the
+// "OT pair with treasury fee" slot — when users swap SPRK for RWT (or vice
 // versa), the OT treasury collects a portion of the fee via the
 // `has_ot_treasury` PoolState branch (handled inside swap.rs).
 //
 // Pool PDA seed: ["pool", min(arl, rwt), max(arl, rwt)]. The pool requires RWT
 // as one mint (DEX validation::token_a_is_rwt enforces). Seed: 1_000 RWT +
-// 1_000 ARL OT = balanced 50/50 (per plan §88).
+// 1_000 SPRK OT = balanced 50/50 (per plan §88).
 
-async function phaseArlRwtPool(
+async function phaseSprkRwtPool(
   conn: Connection,
   deployer: Keypair,
   art: Artifact,
 ): Promise<void> {
-  log('phase-l', 'creating ARL_OT/RWT StandardCurve pool + seeding liquidity');
+  log('phase-l', 'creating SPRK_OT/RWT StandardCurve pool + seeding liquidity');
 
   if (!art.ots || art.ots.length === 0) {
-    warn('phase-l', 'no OTs in artifact; skipping ARL/RWT pool');
+    warn('phase-l', 'no OTs in artifact; skipping SPRK/RWT pool');
     return;
   }
-  const arlOt = art.ots[ARL_OT_INDEX];
-  if (!arlOt) {
-    warn('phase-l', `ots[${ARL_OT_INDEX}] missing; skipping ARL/RWT pool`);
+  const sprkOt = art.ots[SPRK_OT_INDEX];
+  if (!sprkOt) {
+    warn('phase-l', `ots[${SPRK_OT_INDEX}] missing; skipping SPRK/RWT pool`);
     return;
   }
   if (!art.mints?.rwt_mint) {
-    warn('phase-l', 'rwt_mint missing; skipping ARL/RWT pool');
+    warn('phase-l', 'rwt_mint missing; skipping SPRK/RWT pool');
     return;
   }
-  if (!arlOt.initial_supply_minted) {
-    warn('phase-l', 'ARL initial supply not yet minted; skipping ARL/RWT pool seed');
+  if (!sprkOt.initial_supply_minted) {
+    warn('phase-l', 'SPRK initial supply not yet minted; skipping SPRK/RWT pool seed');
     return;
   }
 
@@ -2519,14 +2549,14 @@ async function phaseArlRwtPool(
   const dexIdl = loadIdl('native-dex');
   const skipped = art.init_skipped ?? [];
 
-  const arlMint = new PublicKey(arlOt.ot_mint);
+  const sprkMint = new PublicKey(sprkOt.ot_mint);
   const rwtMint = new PublicKey(art.mints.rwt_mint);
-  const otTreasuryPda = new PublicKey(arlOt.ot_treasury_pda);
+  const otTreasuryPda = new PublicKey(sprkOt.ot_treasury_pda);
 
   // Canonical pool order: a < b
-  const [tokenA, tokenB] = arlMint.toBuffer().compare(rwtMint.toBuffer()) < 0
-    ? [arlMint, rwtMint]
-    : [rwtMint, arlMint];
+  const [tokenA, tokenB] = sprkMint.toBuffer().compare(rwtMint.toBuffer()) < 0
+    ? [sprkMint, rwtMint]
+    : [rwtMint, sprkMint];
 
   const [poolPda] = findPda(
     [Buffer.from('pool'), tokenA.toBuffer(), tokenB.toBuffer()],
@@ -2547,13 +2577,13 @@ async function phaseArlRwtPool(
   let vaultB: PublicKey;
 
   if (existing) {
-    log('phase-l', 'ARL/RWT pool already exists, reading vaults from state');
+    log('phase-l', 'SPRK/RWT pool already exists, reading vaults from state');
     vaultA = new PublicKey(existing.data.subarray(73, 105));
     vaultB = new PublicKey(existing.data.subarray(105, 137));
   } else {
     if (!ixExists(dexIdl, 'create_pool')) {
-      warn('phase-l', 'DEX IDL missing create_pool; skipping ARL/RWT pool');
-      skipped.push('DEX::create_pool ARL/RWT');
+      warn('phase-l', 'DEX IDL missing create_pool; skipping SPRK/RWT pool');
+      skipped.push('DEX::create_pool SPRK/RWT');
       art.init_skipped = skipped;
       return;
     }
@@ -2586,13 +2616,13 @@ async function phaseArlRwtPool(
       await sendAndConfirm(conn, tx, [deployer, vaultAKp, vaultBKp]);
       vaultA = vaultAKp.publicKey;
       vaultB = vaultBKp.publicKey;
-      log('phase-l', `ARL/RWT pool created (pool=${poolPda.toBase58()}, has_ot_treasury=true)`);
+      log('phase-l', `SPRK/RWT pool created (pool=${poolPda.toBase58()}, has_ot_treasury=true)`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      warn('phase-l', `create_pool ARL/RWT failed: ${msg}`);
+      warn('phase-l', `create_pool SPRK/RWT failed: ${msg}`);
       const head = (msg.split('\n')[0] ?? msg).slice(0, 120);
       const failed = art.init_failed ?? [];
-      failed.push({ phase: 'DEX::create_pool ARL/RWT', error: head });
+      failed.push({ phase: 'DEX::create_pool SPRK/RWT', error: head });
       art.init_failed = failed;
       return;
     }
@@ -2600,43 +2630,43 @@ async function phaseArlRwtPool(
 
   art.pdas = {
     ...art.pdas!,
-    arl_rwt_pool: poolPda.toBase58(),
-    arl_rwt_pool_vault_a: vaultA.toBase58(),
-    arl_rwt_pool_vault_b: vaultB.toBase58(),
+    sprk_rwt_pool: poolPda.toBase58(),
+    sprk_rwt_pool_vault_a: vaultA.toBase58(),
+    sprk_rwt_pool_vault_b: vaultB.toBase58(),
   };
 
   // Seed liquidity if not already seeded.
   const existingLiquidity = await getTokenBalance(conn, vaultA);
   if (existingLiquidity > 0n) {
-    log('phase-l', `ARL/RWT pool already seeded (vaultA=${existingLiquidity.toString()})`);
+    log('phase-l', `SPRK/RWT pool already seeded (vaultA=${existingLiquidity.toString()})`);
     return;
   }
 
   if (!ixExists(dexIdl, 'add_liquidity')) {
-    warn('phase-l', 'DEX IDL missing add_liquidity; skipping ARL/RWT pool seed');
-    skipped.push('DEX::add_liquidity ARL/RWT');
+    warn('phase-l', 'DEX IDL missing add_liquidity; skipping SPRK/RWT pool seed');
+    skipped.push('DEX::add_liquidity SPRK/RWT');
     art.init_skipped = skipped;
     return;
   }
 
-  // Provider has 1_000_000 ARL minted in phaseArlMint. RWT comes from
+  // Provider has 1_000_000 SPRK minted in phaseSprkMint. RWT comes from
   // admin_mint_rwt (idempotent: only top-up the delta).
-  const deployerArlAta = await ensureAta(conn, deployer, arlMint, deployer.publicKey);
+  const deployerSprkAta = await ensureAta(conn, deployer, sprkMint, deployer.publicKey);
   const deployerRwtAta = await ensureAta(conn, deployer, rwtMint, deployer.publicKey);
 
-  const arlBal = await getTokenBalance(conn, deployerArlAta);
-  if (arlBal < ARL_RWT_POOL_SEED_ARL) {
+  const sprkBal = await getTokenBalance(conn, deployerSprkAta);
+  if (sprkBal < SPRK_RWT_POOL_SEED_SPRK) {
     warn(
       'phase-l',
-      `deployer ARL balance ${arlBal.toString()} < seed ${ARL_RWT_POOL_SEED_ARL.toString()}; skipping pool seed`,
+      `deployer SPRK balance ${sprkBal.toString()} < seed ${SPRK_RWT_POOL_SEED_SPRK.toString()}; skipping pool seed`,
     );
-    skipped.push('DEX::add_liquidity ARL/RWT (insufficient ARL)');
+    skipped.push('DEX::add_liquidity SPRK/RWT (insufficient SPRK)');
     art.init_skipped = skipped;
     return;
   }
 
   const rwtBal = await getTokenBalance(conn, deployerRwtAta);
-  if (rwtBal < ARL_RWT_POOL_SEED_RWT) {
+  if (rwtBal < SPRK_RWT_POOL_SEED_RWT) {
     const rwtIdl = loadIdl('rwt-engine');
     if (ixExists(rwtIdl, 'admin_mint_rwt')) {
       try {
@@ -2645,7 +2675,7 @@ async function phaseArlRwtPool(
           new PublicKey(art.programs.rwt_engine),
           conn,
         );
-        const need = ARL_RWT_POOL_SEED_RWT - rwtBal;
+        const need = SPRK_RWT_POOL_SEED_RWT - rwtBal;
         const adminTx = rwtClient.buildTransaction('admin_mint_rwt', {
           accounts: {
             authority: deployer.publicKey,
@@ -2660,29 +2690,29 @@ async function phaseArlRwtPool(
           },
         });
         await sendAndConfirm(conn, adminTx, [deployer]);
-        log('phase-l', `admin_mint_rwt: minted ${need.toString()} RWT for ARL/RWT pool seed`);
+        log('phase-l', `admin_mint_rwt: minted ${need.toString()} RWT for SPRK/RWT pool seed`);
       } catch (e: unknown) {
         warn(
           'phase-l',
-          `admin_mint_rwt for ARL/RWT seed failed: ${e instanceof Error ? e.message : String(e)}`,
+          `admin_mint_rwt for SPRK/RWT seed failed: ${e instanceof Error ? e.message : String(e)}`,
         );
-        skipped.push('DEX::add_liquidity ARL/RWT (admin_mint_rwt failed)');
+        skipped.push('DEX::add_liquidity SPRK/RWT (admin_mint_rwt failed)');
         art.init_skipped = skipped;
         return;
       }
     } else {
-      warn('phase-l', 'RWT IDL missing admin_mint_rwt; skipping ARL/RWT pool seed');
-      skipped.push('DEX::add_liquidity ARL/RWT (no admin_mint_rwt)');
+      warn('phase-l', 'RWT IDL missing admin_mint_rwt; skipping SPRK/RWT pool seed');
+      skipped.push('DEX::add_liquidity SPRK/RWT (no admin_mint_rwt)');
       art.init_skipped = skipped;
       return;
     }
   }
 
   // Map ATAs and amounts to canonical token order.
-  const providerTokenA = tokenA.equals(arlMint) ? deployerArlAta : deployerRwtAta;
-  const providerTokenB = tokenB.equals(arlMint) ? deployerArlAta : deployerRwtAta;
-  const amountA = tokenA.equals(arlMint) ? ARL_RWT_POOL_SEED_ARL : ARL_RWT_POOL_SEED_RWT;
-  const amountB = tokenB.equals(arlMint) ? ARL_RWT_POOL_SEED_ARL : ARL_RWT_POOL_SEED_RWT;
+  const providerTokenA = tokenA.equals(sprkMint) ? deployerSprkAta : deployerRwtAta;
+  const providerTokenB = tokenB.equals(sprkMint) ? deployerSprkAta : deployerRwtAta;
+  const amountA = tokenA.equals(sprkMint) ? SPRK_RWT_POOL_SEED_SPRK : SPRK_RWT_POOL_SEED_RWT;
+  const amountB = tokenB.equals(sprkMint) ? SPRK_RWT_POOL_SEED_SPRK : SPRK_RWT_POOL_SEED_RWT;
 
   const [lpPda] = findPda(
     [Buffer.from('lp'), poolPda.toBuffer(), deployer.publicKey.toBuffer()],
@@ -2693,13 +2723,13 @@ async function phaseArlRwtPool(
   // (vault_a == 0) uses min_shares: 0 — share calc deterministic. Non-empty
   // re-seed computes 1%-slippage min_shares floor client-side via
   // computeMinSharesForReseed.
-  const arlVaultABalance = await getTokenBalance(conn, vaultA);
-  let arlMinShares: bigint = 0n;
-  if (arlVaultABalance > 0n) {
-    arlMinShares = await computeMinSharesForReseed(conn, poolPda, amountA, amountB);
+  const sprkVaultABalance = await getTokenBalance(conn, vaultA);
+  let sprkMinShares: bigint = 0n;
+  if (sprkVaultABalance > 0n) {
+    sprkMinShares = await computeMinSharesForReseed(conn, poolPda, amountA, amountB);
     log(
       'phase-l',
-      `non-empty re-seed: computed min_shares=${arlMinShares.toString()} (1% slippage floor)`,
+      `non-empty re-seed: computed min_shares=${sprkMinShares.toString()} (1% slippage floor)`,
     );
   }
 
@@ -2718,7 +2748,7 @@ async function phaseArlRwtPool(
       token_program: TOKEN_PROGRAM_ID,
       system_program: SYSTEM_PROGRAM_ID,
     },
-    args: { amount_a: Number(amountA), amount_b: Number(amountB), min_shares: Number(arlMinShares) },
+    args: { amount_a: Number(amountA), amount_b: Number(amountB), min_shares: Number(sprkMinShares) },
   });
   // T-10 — match rest-of-file pattern: record send failures as init_failed and
   // continue.
@@ -2726,14 +2756,14 @@ async function phaseArlRwtPool(
     await sendAndConfirm(conn, seedTx, [deployer]);
     log(
       'phase-l',
-      `ARL/RWT pool seeded (${amountA.toString()}/${amountB.toString()} base units, balanced)`,
+      `SPRK/RWT pool seeded (${amountA.toString()}/${amountB.toString()} base units, balanced)`,
     );
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    warn('phase-l', `ARL/RWT pool add_liquidity failed: ${msg}`);
+    warn('phase-l', `SPRK/RWT pool add_liquidity failed: ${msg}`);
     const head = (msg.split('\n')[0] ?? msg).slice(0, 120);
     const failed = art.init_failed ?? [];
-    failed.push({ phase: 'DEX::add_liquidity ARL/RWT', error: head });
+    failed.push({ phase: 'DEX::add_liquidity SPRK/RWT', error: head });
     art.init_failed = failed;
   }
 }
@@ -3142,30 +3172,30 @@ async function main(): Promise<void> {
   saveArtifact(argv.artifact, art);
 
   // ---------------------------------------------------------------------
-  // Layer 10 substep 2 — Phase 3 ARL OT bootstrap (plan §63-77).
-  // Runs AFTER phaseOts so the ARL OT config / governance / distributor
+  // Layer 10 substep 2 — Phase 3 SPRK OT bootstrap (plan §63-77).
+  // Runs AFTER phaseOts so the SPRK OT config / governance / distributor
   // accounts exist, and BEFORE any authority-transfer phase (R-B
   // mitigation: mint_ot must happen while deployer is still OT authority).
   // ---------------------------------------------------------------------
   await phaseFutarchy(conn, deployer, art);
   saveArtifact(argv.artifact, art);
 
-  await phaseArlDistributor(conn, deployer, art);
+  await phaseSprkDistributor(conn, deployer, art);
   saveArtifact(argv.artifact, art);
 
   await phaseDestinations(conn, deployer, art);
   saveArtifact(argv.artifact, art);
 
-  await phaseArlMint(conn, deployer, art);
+  await phaseSprkMint(conn, deployer, art);
   saveArtifact(argv.artifact, art);
 
   // ---------------------------------------------------------------------
-  // Layer 10 substep 2 — Phase 4 step 2 (ARL/RWT StandardCurve pool).
+  // Layer 10 substep 2 — Phase 4 step 2 (SPRK/RWT StandardCurve pool).
   // Master RWT/USDC concentrated pool was created in phaseMasterPool above
-  // (Phase 4 step 3 + 4); the ARL/RWT pair pool is the second pool of
-  // Phase 4. Seeding requires ARL initial supply minted in phaseArlMint.
+  // (Phase 4 step 3 + 4); the SPRK/RWT pair pool is the second pool of
+  // Phase 4. Seeding requires SPRK initial supply minted in phaseSprkMint.
   // ---------------------------------------------------------------------
-  await phaseArlRwtPool(conn, deployer, art);
+  await phaseSprkRwtPool(conn, deployer, art);
   saveArtifact(argv.artifact, art);
 
   // ---------------------------------------------------------------------
@@ -3178,9 +3208,9 @@ async function main(): Promise<void> {
   // ============================================================================
   // SUBSTEP 3 HARD-GATE — R-B mitigation
   // DO NOT INSERT ANY AUTHORITY-TRANSFER PHASE BEFORE THIS LINE.
-  // phaseArlMint MUST run before any deployer→Futarchy / deployer→Multisig
+  // phaseSprkMint MUST run before any deployer→Futarchy / deployer→Multisig
   // authority handover, otherwise mint_ot fails with `has_one = authority`
-  // and ARL initial supply is permanently unmintable.
+  // and SPRK initial supply is permanently unmintable.
   // ============================================================================
 
   art.init_completed_at = new Date().toISOString();

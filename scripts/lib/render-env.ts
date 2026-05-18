@@ -41,7 +41,7 @@ interface Artifact {
   };
   mints?: {
     usdc_test_mint: string;
-    arl_ot_mint?: string;
+    sprk_ot_mint?: string;
     rwt_mint?: string;
   };
   pdas?: {
@@ -163,7 +163,7 @@ const BOTS: BotSpec[] = [
       PROOF_DIR: '../merkle-publisher/data/proofs',
       OT_PROJECTS: otProjects(art),
       OT_RWT_POOLS: art.pdas?.master_pool ?? '',
-      ARL_OT_MINT: art.mints?.arl_ot_mint ?? '',
+      SPRK_OT_MINT: art.mints?.sprk_ot_mint ?? '',
       RWT_MINT: art.mints?.rwt_mint ?? '',
       CLAIM_INTERVAL_SECS: art.bootstrap_target === 'localhost' ? '5' : '60',
       COMPUTE_UNIT_LIMIT: '150000',
@@ -216,7 +216,7 @@ const BOTS: BotSpec[] = [
       OT_PROGRAM_ID: art.programs.ownership_token,
       DEX_PROGRAM_ID: art.programs.native_dex,
       MIN_HOLDING_OT_LAMPORTS: '100000000',
-      ARL_OT_TREASURY: art.mints?.arl_ot_mint ?? '',
+      SPRK_OT_TREASURY: art.mints?.sprk_ot_mint ?? '',
       PUBLISHER_PUBKEY: art.bots?.['merkle-publisher']?.pubkey ?? '',
       PUBLISH_INTERVAL_MS: art.bootstrap_target === 'localhost' ? '5000' : '60000',
       KMS_PROVIDER: 'local',

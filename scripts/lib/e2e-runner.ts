@@ -97,7 +97,7 @@ interface BootstrapState {
     rwt_engine: string;
     yield_distribution: string;
   };
-  mints?: { usdc_test_mint: string; rwt_mint?: string; arl_ot_mint?: string };
+  mints?: { usdc_test_mint: string; rwt_mint?: string; sprk_ot_mint?: string };
   pdas?: {
     dex_config?: string;
     rwt_vault?: string;

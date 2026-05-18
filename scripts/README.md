@@ -11,7 +11,7 @@ zero remaining deployer authority.
 
 | Script | Role |
 |---|---|
-| `scripts/deploy.sh` | 8-phase end-to-end orchestrator (deploy → R20 mint-pin → ARL OT → DEX pools → Nexus → bot wallets → authority transfers → bot startup). Idempotent on re-run; each phase reads the artifact and skips already-completed work. |
+| `scripts/deploy.sh` | 8-phase end-to-end orchestrator (deploy → R20 mint-pin → SPRK OT → DEX pools → Nexus → bot wallets → authority transfers → bot startup). Idempotent on re-run; each phase reads the artifact and skips already-completed work. |
 | `scripts/migrate-mints.sh` | R20 RWT mint-pin migration tool (Substep 1). Rebuilds `yield-distribution` with the canonical RWT mint pinned in `constants.rs`. The compile-time tripwire fails the build if the dev-placeholder feature is left on. |
 | `scripts/lib/start-bots.ts` | Phase 8 bot orchestrator. Funds → spawns → heartbeat-verifies the 6 bots in defined order. R30 single-instance lock + bot-wallet → contract-surface mapping verification + on-chain liveness probe (publisher's `MerkleDistributor.merkle_root` zero → non-zero transition) gate Phase 8 completion. |
 | `scripts/lib/transfer-authority.ts` | Phase 7 atomic authority chain. Rotates all 5 contract-state authorities to the multisig and emits the deployer-zero-authority proof in two halves: a POSITIVE side (every contract authority == expected target) and a NEGATIVE side (deployer is not the authority anywhere). |
@@ -92,7 +92,7 @@ Cold run: ~5–8 min (most of it is `cargo build-sbf`). Warm restart with
 | `SBF_PARALLEL` | `0` | Build the 5 programs in parallel |
 | `DEPLOYER_AIRDROP_SOL` | `100` | Airdrop target for the deployer |
 | `CRANK_AIRDROP_SOL` | `5` | Per-bot airdrop |
-| `OT_TEST_COUNT` | `3` | Number of test OTs to create + distributors to wire |
+| `OT_TEST_COUNT` | `0` | Number of EXTRA test OTs (beyond canonical SPRK at index 0) + distributors to wire |
 | `VALIDATOR_LEDGER_DIR` | `data/test-ledger` | Override ledger path |
 
 ### Stages

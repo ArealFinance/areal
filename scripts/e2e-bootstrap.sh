@@ -15,7 +15,7 @@
 #   SBF_PARALLEL=1               Build the 5 programs in parallel (default sequential)
 #   DEPLOYER_AIRDROP_SOL=100     Deployer airdrop in SOL (default 100)
 #   CRANK_AIRDROP_SOL=5          Per-bot airdrop in SOL (default 5)
-#   OT_TEST_COUNT=3              Number of test OTs to create (default 3)
+#   OT_TEST_COUNT=0              Number of EXTRA test OTs (beyond canonical SPRK at index 0; default 0)
 #   VALIDATOR_LEDGER_DIR=...     Override ledger dir (default data/test-ledger)
 #
 # Outputs:
@@ -55,7 +55,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 SBF_PARALLEL="${SBF_PARALLEL:-0}"
 DEPLOYER_AIRDROP_SOL="${DEPLOYER_AIRDROP_SOL:-100}"
 CRANK_AIRDROP_SOL="${CRANK_AIRDROP_SOL:-5}"
-OT_TEST_COUNT="${OT_TEST_COUNT:-3}"
+OT_TEST_COUNT="${OT_TEST_COUNT:-0}"
 
 # Vanity program IDs (canonical, from scripts/verify-program-ids.sh).
 declare -a PROGRAMS=(
@@ -787,8 +787,8 @@ if mints.get('usdc_test_mint'):
     lines.append(f"export USDC_MINT={mints['usdc_test_mint']}")
 if mints.get('rwt_mint'):
     lines.append(f"export RWT_MINT={mints['rwt_mint']}")
-if mints.get('arl_ot_mint'):
-    lines.append(f"export ARL_OT_MINT={mints['arl_ot_mint']}")
+if mints.get('sprk_ot_mint'):
+    lines.append(f"export SPRK_OT_MINT={mints['sprk_ot_mint']}")
 pdas = art.get('pdas') or {}
 if pdas.get('master_pool'):
     lines.append(f"export MASTER_RWT_USDC_POOL={pdas['master_pool']}")
