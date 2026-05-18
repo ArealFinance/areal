@@ -357,9 +357,12 @@ ensure_vps_vanity_keys() {
   fi
 
   log "  [rsync] $local_vanity_dir/ -> $SSH_HOST:$VPS_REPO_ROOT/keys/vanity/"
-  rsync -av --chmod=F0600 --include='*.json' --exclude='*' \
+  rsync -av --include='*.json' --exclude='*' \
     "$local_vanity_dir/" "$SSH_HOST:$VPS_REPO_ROOT/keys/vanity/" \
     >> "$LOG_FILE" 2>&1
+  # Enforce 0600 on remote — rsync's --chmod syntax varies across versions
+  # (macOS BSD rsync rejects F0600), so apply chmod after via ssh.
+  remote "chmod 0600 $VPS_REPO_ROOT/keys/vanity/*.json"
 }
 
 # ----------------------------------------------------------------------------
