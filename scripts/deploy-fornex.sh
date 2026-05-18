@@ -417,7 +417,6 @@ deploy_programs() {
     local crate_snake
     crate_snake="$(echo "$crate" | tr '-' '_')"
     local so="$VPS_REPO_ROOT/contracts/target/deploy/${crate_snake}.so"
-    local vanity_kp="$VPS_REPO_ROOT/keys/vanity/${addr}.json"
 
     log "  step 6.${crate}: upgrade $crate -> $addr"
 
@@ -427,10 +426,12 @@ deploy_programs() {
     # loudly if it's wrong.
     remote "$VPS_SOLANA_BIN program show $addr --url $VPS_RPC_LOCAL | head -10"
 
-    # `solana program deploy --program-id <vanity-kp>` performs an upgrade
-    # in place on BPF Loader v3 (same mechanism as e2e-bootstrap.sh and
-    # deploy.sh::redeploy_r20_contracts).
-    remote "$VPS_SOLANA_BIN program deploy --url $VPS_RPC_LOCAL --keypair $VPS_DEPLOYER_KP --program-id $vanity_kp $so"
+    # `solana program deploy --program-id <pubkey>` performs an upgrade in
+    # place on BPF Loader v3. We pass the raw base58 program ID, not a
+    # keypair file — the program already exists, so its keypair is not
+    # required; only the upgrade authority signature (from --keypair) is.
+    # This avoids needing to propagate keys/vanity/*.json to the VPS.
+    remote "$VPS_SOLANA_BIN program deploy --url $VPS_RPC_LOCAL --keypair $VPS_DEPLOYER_KP --program-id $addr $so"
   done
 }
 
