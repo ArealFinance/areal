@@ -187,6 +187,7 @@ pull_file() {
 # ----------------------------------------------------------------------------
 
 TUNNEL_PID=""
+R20_MUTATED_FILES=0
 
 teardown_tunnel() {
   if [[ -n "$TUNNEL_PID" ]]; then
@@ -197,8 +198,32 @@ teardown_tunnel() {
   fi
 }
 
-# ERR / EXIT trap so SSH tunnel is always cleaned up, even on partial failure.
-trap 'rc=$?; teardown_tunnel; exit $rc' EXIT
+# Restore local constants.rs files mutated by r20_migrate_local. The R20
+# migration step rewrites RWT_MINT / USDC_MINT bytes in 3 contracts to pin
+# them to the VPS-side mint pubkeys before the build/deploy/bootstrap chain.
+# Once VPS has the pinned .so artifacts deployed, the local source tree
+# should revert to placeholder bytes so a subsequent local `verify-fresh-
+# deploy.sh` (or any local cargo build-sbf) operates on a clean tree. Run
+# unconditionally on EXIT so a mid-pipeline failure still leaves the
+# working copy clean.
+teardown_r20_local() {
+  if (( R20_MUTATED_FILES == 0 )); then
+    return 0
+  fi
+  log "cleanup: reverting local constants.rs to placeholder + clearing R20 sentinel"
+  (
+    cd "$ROOT_DIR/contracts"
+    git checkout -- \
+      yield-distribution/src/constants.rs \
+      native-dex/src/constants.rs \
+      ownership-token/src/constants.rs 2>/dev/null || true
+  )
+  rm -f "$DATA_DIR/r20-migrated.json" 2>/dev/null || true
+}
+
+# ERR / EXIT trap so SSH tunnel + local R20 mutations are always cleaned up,
+# even on partial failure.
+trap 'rc=$?; teardown_tunnel; teardown_r20_local; exit $rc' EXIT
 trap 'log "ERR: caught signal — aborting"; exit 1' INT TERM
 
 open_tunnel() {
@@ -386,6 +411,109 @@ ensure_vps_vanity_keys() {
 }
 
 # ----------------------------------------------------------------------------
+# Step 4.6 — R20 mint-pin migration (LOCAL only, mirrors verify-fresh-deploy.sh)
+# ----------------------------------------------------------------------------
+#
+# Root cause this step fixes: the DEX `update_areal_fee_destination`
+# instruction (and runtime swap.rs / zap_liquidity.rs guards) validate
+# `read_token_account_mint(areal_fee_account) == RWT_MINT`, where RWT_MINT
+# is a compile-time constant baked into the .so binary at the bytes in
+# `contracts/native-dex/src/constants.rs`. On a fresh VPS bootstrap the
+# RWT mint is generated as a random keypair (`Keypair.generate()` retried
+# for canonical `rwt < usdc` byte ordering — see bootstrap-init.ts
+# phase-c), so the on-chain mint pubkey never matches the placeholder
+# constant in the shipped .so. Result: every swap (and the bootstrap's
+# own DexConfig fee-destination rotation) reverts with 0x178e
+# InvalidProtocolFeeDestination.
+#
+# Local-mac `verify-fresh-deploy.sh` sidesteps this via `stage_pregen_keypairs`
+# (exports RWT_MINT_PUBKEY + USDC_MINT_PUBKEY) → `stage_r20_migrate` inside
+# e2e-bootstrap.sh runs scripts/migrate-mints.sh, which rewrites constants.rs
+# in all 3 R20-pinned crates (YD/DEX/OT) and rebuilds those .so files with
+# the real pubkey bytes baked in. The fresh VPS path bypassed that flow
+# entirely because deploy-fornex.sh runs e2e-bootstrap.sh without
+# RWT_MINT_PUBKEY in env, AND the VPS has no Rust/cargo-build-sbf toolchain
+# so it can't run migrate-mints.sh's rebuild step.
+#
+# Fix: do the migration LOCALLY on the mac (where the toolchain lives), so
+# the .so artifacts rsynced in step 5 already have the pinned bytes. The
+# pubkeys come from the VPS-side secrets file (b64-encoded keypairs from a
+# prior bootstrap or pushed-fresh from local). After deploy + bootstrap
+# succeeds the EXIT trap reverts constants.rs to placeholder via
+# `git checkout` so the local source tree stays clean.
+#
+# Skipped on --skip-build (caller is asserting the rsynced .so artifacts on
+# VPS already match the on-chain mints — typical for re-bootstrap with no
+# code changes; mismatch will still fire 0x178e at swap time and the
+# operator should drop --skip-build).
+r20_migrate_local() {
+  if (( SKIP_BUILD )); then
+    log "step 4.6: --skip-build set; skipping R20 local mint-pin (assuming existing .so artifacts already pinned)"
+    return 0
+  fi
+
+  log "step 4.6: R20 local mint-pin (derive pubkeys from VPS secrets, rewrite constants.rs, rebuild 3 contracts)"
+
+  if (( DRY_RUN )); then
+    log "  (dry-run: skipping)"
+    return 0
+  fi
+
+  # Derive RWT + USDC test-mint pubkeys from the VPS secrets file. b64
+  # keypair → 64-byte raw secret → last 32 bytes are the public key. Doing
+  # this server-side (over ssh) keeps the b64 secret material on the VPS
+  # at rest; only the pubkey strings transit back over the SSH channel.
+  local pubkeys
+  pubkeys="$(ssh "$SSH_HOST" "python3 - <<'PY'
+import json, base64
+with open('$VPS_SECRETS_FILE') as f:
+    d = json.load(f)
+m = d.get('mints', {})
+rwt_b64 = m.get('rwt_mint_keypair_b64', '')
+usdc_b64 = m.get('usdc_test_mint_keypair_b64', '')
+if not rwt_b64 or not usdc_b64:
+    raise SystemExit('ERROR: VPS secrets missing rwt_mint_keypair_b64 or usdc_test_mint_keypair_b64')
+rwt_raw = base64.b64decode(rwt_b64)
+usdc_raw = base64.b64decode(usdc_b64)
+if len(rwt_raw) != 64 or len(usdc_raw) != 64:
+    raise SystemExit(f'ERROR: keypair b64 decode wrong length (rwt={len(rwt_raw)}, usdc={len(usdc_raw)})')
+print(rwt_raw[32:].hex())
+print(usdc_raw[32:].hex())
+PY
+")"
+
+  local rwt_hex usdc_hex
+  rwt_hex="$(echo "$pubkeys" | sed -n '1p')"
+  usdc_hex="$(echo "$pubkeys" | sed -n '2p')"
+
+  if [[ -z "$rwt_hex" || -z "$usdc_hex" ]]; then
+    log "ERROR: failed to derive RWT/USDC pubkeys from VPS secrets"
+    log "  ssh output: $pubkeys"
+    exit 1
+  fi
+
+  # Convert hex → base58 locally (avoid shipping the pubkeys back through
+  # another ssh round-trip).
+  local rwt_pk usdc_pk
+  rwt_pk="$(python3 -c "import base58; print(base58.b58encode(bytes.fromhex('$rwt_hex')).decode())")"
+  usdc_pk="$(python3 -c "import base58; print(base58.b58encode(bytes.fromhex('$usdc_hex')).decode())")"
+
+  log "  derived RWT_MINT_PUBKEY=$rwt_pk"
+  log "  derived USDC_MINT_PUBKEY=$usdc_pk"
+
+  # Mark constants.rs as mutated BEFORE running migrate-mints.sh so the EXIT
+  # trap reverts the working tree even on a mid-migration crash.
+  R20_MUTATED_FILES=1
+
+  log "  running scripts/migrate-mints.sh (rewrites RWT_MINT/USDC_MINT, rebuilds 3 R20 contracts)"
+  RWT_MINT_PUBKEY="$rwt_pk" USDC_MINT_PUBKEY="$usdc_pk" \
+    bash "$SCRIPT_DIR/migrate-mints.sh" 2>&1 | tee -a "$LOG_FILE" \
+    || { log "ERROR: migrate-mints.sh failed; see $LOG_FILE"; exit 1; }
+
+  log "  R20 local migration OK — .so artifacts now hold pinned RWT_MINT bytes"
+}
+
+# ----------------------------------------------------------------------------
 # Step 5 — build contracts LOCALLY on the mac, rsync .so artifacts to VPS
 # ----------------------------------------------------------------------------
 #
@@ -555,6 +683,45 @@ run_smoke() {
     pull_file "$VPS_ARTIFACT_FILE" "$LOCAL_ARTIFACT_FILE"
   fi
 
+  # smoke-swap.ts also reads data/e2e-bootstrap.secrets.json to load the
+  # RWT/USDC test-mint authorities (needed to mint test tokens to the smoke
+  # actor). The b64 keypairs in that file must match the on-chain mints —
+  # so pull the VPS-side secrets too. Same backup pattern as the artifact:
+  # preserve any pre-existing local secrets in a .preFornexBackup sidecar
+  # so a subsequent local verify-fresh-deploy.sh has them on hand.
+  #
+  # The VPS secrets file holds `deployer_keypair_path` pointing at the
+  # absolute VPS path (`/opt/areal/deploy-keypair.json`). smoke-swap.ts
+  # reads this path directly via `loadKeypairFromFile`, so we rewrite it
+  # to the local mac path before smoke runs. The deployer keypair on
+  # both sides is the same Ed25519 key (push_keypair copies from local),
+  # so just pointing at the local copy works.
+  log "step 8a.2: syncing VPS bootstrap secrets to local"
+  if (( DRY_RUN )); then
+    log "  (dry-run: skipping secrets sync)"
+  else
+    if [[ -f "$LOCAL_SECRETS_FILE" ]]; then
+      cp -f "$LOCAL_SECRETS_FILE" "${LOCAL_SECRETS_FILE}.preFornexBackup"
+      log "  backed up existing local secrets -> ${LOCAL_SECRETS_FILE}.preFornexBackup"
+    fi
+    pull_file "$VPS_SECRETS_FILE" "$LOCAL_SECRETS_FILE"
+    chmod 0600 "$LOCAL_SECRETS_FILE"
+
+    # Rewrite deployer_keypair_path to the local copy so smoke-swap.ts
+    # can sign txns from the operator's mac.
+    python3 - "$LOCAL_SECRETS_FILE" "$LOCAL_DEPLOYER_KP" <<'PY'
+import json, sys
+path, local_kp = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    d = json.load(f)
+d["deployer_keypair_path"] = local_kp
+with open(path, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+PY
+    log "  rewrote deployer_keypair_path -> $LOCAL_DEPLOYER_KP"
+  fi
+
   log "step 8b: running scripts/smoke-swap.ts against VPS RPC ($SMOKE_RPC_URL)"
   if (( DRY_RUN )); then
     log "  (dry-run: skipping)"
@@ -595,6 +762,7 @@ main() {
   push_keypair
   push_secrets
   ensure_vps_vanity_keys
+  r20_migrate_local
   build_contracts
   deploy_programs
   bootstrap_pools
