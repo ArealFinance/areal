@@ -331,6 +331,38 @@ push_secrets() {
 }
 
 # ----------------------------------------------------------------------------
+# Step 4.5 — ensure VPS has vanity program keypairs (idempotent rsync)
+# ----------------------------------------------------------------------------
+#
+# scripts/e2e-bootstrap.sh preflight requires `keys/vanity/*.json` to exist
+# (it cross-checks the local keypair pubkeys against the canonical vanity
+# program IDs). On dev/test-validator flows these keys are non-sensitive
+# (programs already deployed under deployer authority, not first-deploy).
+# Push them once via rsync; subsequent runs are no-ops if files match.
+ensure_vps_vanity_keys() {
+  log "step 4.5: ensuring VPS vanity keypairs at $VPS_REPO_ROOT/keys/vanity"
+
+  local local_vanity_dir="$REPO_ROOT/keys/vanity"
+  if [[ ! -d "$local_vanity_dir" ]]; then
+    log "  local keys/vanity absent; skipping (VPS bootstrap will fail with vanity-missing)"
+    return 0
+  fi
+
+  remote "mkdir -p $VPS_REPO_ROOT/keys/vanity && chmod 0700 $VPS_REPO_ROOT/keys/vanity"
+
+  if (( DRY_RUN )); then
+    log "  [rsync] $local_vanity_dir/ -> $SSH_HOST:$VPS_REPO_ROOT/keys/vanity/"
+    log "    (dry-run: skipping)"
+    return 0
+  fi
+
+  log "  [rsync] $local_vanity_dir/ -> $SSH_HOST:$VPS_REPO_ROOT/keys/vanity/"
+  rsync -av --chmod=F0600 --include='*.json' --exclude='*' \
+    "$local_vanity_dir/" "$SSH_HOST:$VPS_REPO_ROOT/keys/vanity/" \
+    >> "$LOG_FILE" 2>&1
+}
+
+# ----------------------------------------------------------------------------
 # Step 5 — build contracts LOCALLY on the mac, rsync .so artifacts to VPS
 # ----------------------------------------------------------------------------
 #
@@ -499,6 +531,7 @@ main() {
   sync_repo
   push_keypair
   push_secrets
+  ensure_vps_vanity_keys
   build_contracts
   deploy_programs
   bootstrap_pools
