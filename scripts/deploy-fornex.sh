@@ -342,7 +342,7 @@ push_secrets() {
 ensure_vps_vanity_keys() {
   log "step 4.5: ensuring VPS vanity keypairs at $VPS_REPO_ROOT/keys/vanity"
 
-  local local_vanity_dir="$REPO_ROOT/keys/vanity"
+  local local_vanity_dir="$ROOT_DIR/keys/vanity"
   if [[ ! -d "$local_vanity_dir" ]]; then
     log "  local keys/vanity absent; skipping (VPS bootstrap will fail with vanity-missing)"
     return 0
