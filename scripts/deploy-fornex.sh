@@ -644,6 +644,20 @@ bootstrap_pools() {
   log "  refreshing bots/node_modules on VPS (npm ci)"
   remote "cd $VPS_REPO_ROOT/bots && npm ci --silent"
 
+  # Compile the bot workspaces. `npm ci` only installs deps — the persistent
+  # systemd services (areal-merkle-publisher + the four cranks) run the
+  # COMPILED `dist/src/index.js`, not the tsx source. Without this step the
+  # services keep executing a stale `dist/` (or, for cranks that were only
+  # ever spawned via tsx, none at all). A symptom of the gap: after the
+  # ARL→SPRK OT rename, the stale merkle-publisher `dist/config.js` still
+  # demanded `ARL_OT_TREASURY` while the rendered .env carried
+  # `SPRK_OT_TREASURY`, crash-looping the service on a zod `Required` error.
+  # git safe.directory clears the dubious-ownership warning from the earlier
+  # root-chown of /opt/areal/bots (idempotent).
+  log "  building bot workspaces on VPS (npm run build)"
+  remote "git config --global --add safe.directory $VPS_REPO_ROOT/bots || true"
+  remote "cd $VPS_REPO_ROOT/bots && npm run build"
+
   # bootstrap-init.ts uses NODE_PATH=$VPS_REPO_ROOT/bots/node_modules to find
   # @arlex/client. Locally npm hoists the file://vendor tarball into both
   # bots/ and sdk/ node_modules; on VPS it only lands in sdk/. Symlink it
@@ -652,6 +666,26 @@ bootstrap_pools() {
   remote "mkdir -p $VPS_REPO_ROOT/bots/node_modules/@arlex && ln -sfn $VPS_REPO_ROOT/sdk/node_modules/@arlex/client $VPS_REPO_ROOT/bots/node_modules/@arlex/client"
 
   remote "cd $VPS_REPO_ROOT && PATH=$vps_solana_dir:\$PATH KEEP_LEDGER=1 SKIP_BUILD=1 BOOTSTRAP_TARGET=localhost bash scripts/e2e-bootstrap.sh"
+}
+
+# ----------------------------------------------------------------------------
+# Step 7b — install/refresh the persistent bot systemd services
+# ----------------------------------------------------------------------------
+#
+# bootstrap_pools spawns the cranks ephemerally via start-bots.ts to seed the
+# demo, but those processes do NOT survive a reboot / validator reset. Install
+# them (plus merkle-publisher) as persistent units so the reward pipeline
+# keeps running. Delegates to scripts/install-bot-services.sh, which is
+# idempotent and skips any bot whose dist/ is missing.
+
+install_bot_services() {
+  log "step 7b: installing persistent bot systemd services"
+  if (( DRY_RUN )); then
+    log "  (dry-run: skipping bot service install)"
+    return 0
+  fi
+  SSH_HOST="$SSH_HOST" VPS_REPO_ROOT="$VPS_REPO_ROOT" \
+    bash "$SCRIPT_DIR/install-bot-services.sh"
 }
 
 # ----------------------------------------------------------------------------
@@ -849,6 +883,7 @@ main() {
   build_contracts
   deploy_programs
   bootstrap_pools
+  install_bot_services
   run_smoke
   check_sdk_mint_sync
 
