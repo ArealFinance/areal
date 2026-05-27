@@ -19,3 +19,6 @@
 [submodule "backend"]
 	path = backend
 	url = https://github.com/ArealFinance/backend.git
+[submodule "app-earn"]
+	path = app-earn
+	url = https://github.com/ArealFinance/app-earn.git
