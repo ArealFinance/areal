@@ -3248,12 +3248,31 @@ async function phaseAssertNavInvariant(
 interface Argv {
   artifact: string;
   otCount: number;
+  /**
+   * Cluster override. When set, overrides the `bootstrap_target` field in
+   * the loaded artifact. Used by the devnet redeploy harness
+   * (scripts/deploy-devnet.sh) to point this driver at a devnet artifact
+   * without the localhost-only guard tripping.
+   *
+   * Accepted values: 'localhost' | 'devnet' (mainnet is intentionally
+   * NOT supported — mainnet bootstrap uses scripts/deploy.sh which calls
+   * this driver through e2e-bootstrap.sh's localhost path).
+   */
+  cluster?: 'localhost' | 'devnet';
+  /**
+   * RPC URL override. When set, overrides `art.rpc_url` from the loaded
+   * artifact. Mainly useful when the artifact was generated on a different
+   * host than the one running this driver (e.g. CI runner vs deployer VM).
+   */
+  rpc?: string;
 }
 
 function parseArgv(): Argv {
   const args = process.argv.slice(2);
   let artifact = DEFAULT_ARTIFACT_PATH;
   let otCount = DEFAULT_OT_COUNT;
+  let cluster: Argv['cluster'];
+  let rpc: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const next = args[i + 1];
@@ -3263,10 +3282,19 @@ function parseArgv(): Argv {
     } else if (a === '--ot-count' && next !== undefined) {
       otCount = parseInt(next, 10);
       i++;
+    } else if (a === '--cluster' && next !== undefined) {
+      if (next !== 'localhost' && next !== 'devnet') {
+        throw new Error(`--cluster must be 'localhost' or 'devnet'; got '${next}'`);
+      }
+      cluster = next;
+      i++;
+    } else if (a === '--rpc' && next !== undefined) {
+      rpc = next;
+      i++;
     }
   }
   if (!Number.isFinite(otCount) || otCount < 0) otCount = DEFAULT_OT_COUNT;
-  return { artifact, otCount };
+  return { artifact, otCount, cluster, rpc };
 }
 
 // --------------------------------------------------------------------------
@@ -3278,15 +3306,27 @@ async function main(): Promise<void> {
   log('main', `loading artifact ${argv.artifact}`);
   const art = loadArtifact(argv.artifact);
 
-  if (art.bootstrap_target !== 'localhost') {
+  // CLI overrides take precedence over the artifact's stored values. This
+  // enables the devnet redeploy harness (scripts/deploy-devnet.sh) to
+  // reuse this driver against a devnet artifact:
+  //   - `--cluster devnet` relaxes the localhost-only guard;
+  //   - `--rpc <url>` swaps the on-chain RPC endpoint.
+  if (argv.cluster) {
+    art.bootstrap_target = argv.cluster;
+  }
+  if (argv.rpc) {
+    art.rpc_url = argv.rpc;
+  }
+
+  if (art.bootstrap_target !== 'localhost' && art.bootstrap_target !== 'devnet') {
     throw new Error(
-      `bootstrap-init.ts only supports localhost, got ${art.bootstrap_target}`,
+      `bootstrap-init.ts supports localhost|devnet, got ${art.bootstrap_target}`,
     );
   }
 
   const conn = new Connection(art.rpc_url, 'confirmed');
   const deployer = loadKeypair(art.deployer_keypair_path);
-  log('main', `deployer=${deployer.publicKey.toBase58()}, rpc=${art.rpc_url}`);
+  log('main', `cluster=${art.bootstrap_target}, deployer=${deployer.publicKey.toBase58()}, rpc=${art.rpc_url}`);
 
   const t0 = Date.now();
 
