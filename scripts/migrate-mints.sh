@@ -103,11 +103,6 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_DIR="$ROOT_DIR/data"
-CONSTANTS_FILES=(
-  "$ROOT_DIR/contracts/yield-distribution/src/constants.rs"
-  "$ROOT_DIR/contracts/native-dex/src/constants.rs"
-  "$ROOT_DIR/contracts/ownership-token/src/constants.rs"
-)
 
 # Cluster selection. Default to mainnet so existing operators see no
 # behavior change unless they explicitly opt in to the devnet path.
@@ -116,6 +111,38 @@ case "$CLUSTER" in
   mainnet|devnet) ;;
   *) echo "ERROR: CLUSTER must be 'mainnet' or 'devnet'; got '$CLUSTER'" >&2; exit 1 ;;
 esac
+
+# R20 contract list. Mainnet ceremony covers 3 contracts (YD/DEX/OT) — the
+# historical scope. Devnet bootstrap requires a 4-contract sweep that
+# additionally includes rwt-engine: the mainnet rwt-engine source still
+# carries the same placeholder RWT_MINT bytes as YD/OT, so CPI between
+# native-dex and rwt-engine would silently DoS unless rwt-engine is also
+# rewritten and redeployed alongside the other three.
+if [[ "$CLUSTER" == "devnet" ]]; then
+  CONSTANTS_FILES=(
+    "$ROOT_DIR/contracts/yield-distribution/src/constants.rs"
+    "$ROOT_DIR/contracts/native-dex/src/constants.rs"
+    "$ROOT_DIR/contracts/ownership-token/src/constants.rs"
+    "$ROOT_DIR/contracts/rwt-engine/src/constants.rs"
+  )
+  BUILD_ARTIFACTS=(
+    "$ROOT_DIR/contracts/target/deploy/yield_distribution.so"
+    "$ROOT_DIR/contracts/target/deploy/native_dex.so"
+    "$ROOT_DIR/contracts/target/deploy/ownership_token.so"
+    "$ROOT_DIR/contracts/target/deploy/rwt_engine.so"
+  )
+else
+  CONSTANTS_FILES=(
+    "$ROOT_DIR/contracts/yield-distribution/src/constants.rs"
+    "$ROOT_DIR/contracts/native-dex/src/constants.rs"
+    "$ROOT_DIR/contracts/ownership-token/src/constants.rs"
+  )
+  BUILD_ARTIFACTS=(
+    "$ROOT_DIR/contracts/target/deploy/yield_distribution.so"
+    "$ROOT_DIR/contracts/target/deploy/native_dex.so"
+    "$ROOT_DIR/contracts/target/deploy/ownership_token.so"
+  )
+fi
 
 # Per-cluster defaults for input/output paths.
 if [[ "$CLUSTER" == "devnet" ]]; then
@@ -131,11 +158,6 @@ RPC_URL="${RPC_URL:-}"
 
 LOCK_FILE="$DATA_DIR/migrate-mints.lock"
 LOG_FILE="$DATA_DIR/migrate-mints.log"
-BUILD_ARTIFACTS=(
-  "$ROOT_DIR/contracts/target/deploy/yield_distribution.so"
-  "$ROOT_DIR/contracts/target/deploy/native_dex.so"
-  "$ROOT_DIR/contracts/target/deploy/ownership_token.so"
-)
 DEVNET_KEY_DIR="$ROOT_DIR/keys/devnet"
 DEVNET_DEPLOYER_KP="$DEVNET_KEY_DIR/deployer.json"
 
@@ -568,7 +590,7 @@ log "  yield-distribution USDC_MINT bytes verified"
 stage_end
 
 stage_start "rebuild-sbf"
-log "rebuilding 3 R20-pinned contracts (cluster=$CLUSTER)"
+log "rebuilding ${#CONSTANTS_FILES[@]} R20-pinned contracts (cluster=$CLUSTER)"
 for src in "${CONSTANTS_FILES[@]}"; do
   crate_dir="$(dirname "$(dirname "$src")")"
   crate_name="$(basename "$crate_dir")"
@@ -621,8 +643,9 @@ if [[ "$CLUSTER" == "devnet" && -n "$RPC_URL" ]]; then
     [yield-distribution]="yield_distribution.so"
     [native-dex]="native_dex.so"
     [ownership-token]="ownership_token.so"
+    [rwt-engine]="rwt_engine.so"
   )
-  for short in yield-distribution native-dex ownership-token; do
+  for short in yield-distribution native-dex ownership-token rwt-engine; do
     so="$ROOT_DIR/contracts/target/deploy/${DEVNET_REDEPLOY_SO[$short]}"
     kp="$DEVNET_KEY_DIR/${short}.json"
     [[ -f "$kp" ]] || { log "ERROR: missing devnet program keypair $kp"; exit 1; }
@@ -647,17 +670,24 @@ TS_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 - "$SENTINEL_FILE" "$RWT_MINT_PUBKEY" "$USDC_MINT_PUBKEY" "$TS_UTC" "$CLUSTER" <<'PY'
 import json, sys
 path, rwt, usdc, ts, cluster = sys.argv[1:6]
+contracts = {
+    "yield-distribution": {"rwt_pinned": True, "usdc_pinned": True},
+    "native-dex":         {"rwt_pinned": True, "usdc_pinned": False},
+    "ownership-token":    {"rwt_pinned": True, "usdc_pinned": False},
+}
+# Devnet sweep additionally pins rwt-engine — mainnet rwt-engine source
+# still carries the placeholder RWT_MINT and must be rewritten alongside
+# the other three to keep cross-program CPIs (DEX::mint_route ->
+# rwt-engine::mint_rwt) consistent on devnet.
+if cluster == "devnet":
+    contracts["rwt-engine"] = {"rwt_pinned": True, "usdc_pinned": False}
 sentinel = {
     "schema_version": 2,
     "cluster": cluster,
     "rwt": rwt,
     "usdc": usdc,
     "migrated_at": ts,
-    "contracts": {
-        "yield-distribution": {"rwt_pinned": True, "usdc_pinned": True},
-        "native-dex":         {"rwt_pinned": True, "usdc_pinned": False},
-        "ownership-token":    {"rwt_pinned": True, "usdc_pinned": False},
-    },
+    "contracts": contracts,
 }
 with open(path, "w") as f:
     json.dump(sentinel, f, indent=2)
@@ -666,4 +696,5 @@ PY
 chmod 600 "$SENTINEL_FILE"
 stage_end
 
-log "R20 closed (cluster=$CLUSTER): RWT=$RWT_MINT_PUBKEY, USDC=$USDC_MINT_PUBKEY (3 contracts pinned)"
+contract_count="${#CONSTANTS_FILES[@]}"
+log "R20 closed (cluster=$CLUSTER): RWT=$RWT_MINT_PUBKEY, USDC=$USDC_MINT_PUBKEY ($contract_count contracts pinned)"
