@@ -24,33 +24,76 @@
 #   contracts/native-dex/src/constants.rs       — RWT_MINT placeholder.
 #   contracts/ownership-token/src/constants.rs  — RWT_MINT placeholder.
 #
-# Required env:
-#   RWT_MINT_PUBKEY=<base58>     Real RWT mint pubkey (deployer output)
-#   USDC_MINT_PUBKEY=<base58>    Real USDC mint pubkey (canonical)
+# CLUSTER selection (env, optional):
+#   CLUSTER=mainnet (default) — Original mainnet behavior. RWT_MINT_PUBKEY +
+#                               USDC_MINT_PUBKEY must be set in env. The
+#                               existing flat `pub const RWT_MINT/USDC_MINT`
+#                               blocks are edited in-place. Build runs
+#                               WITHOUT the `--features devnet` flag and
+#                               (for YD) WITHOUT `dev-placeholder-mints`,
+#                               so the R20 tripwire fires on bad input.
+#                               Sentinel: data/r20-migrated.json.
 #
-# Behavior:
+#   CLUSTER=devnet            — Reads RWT mint from data/devnet-addresses.json
+#                               (`.mints.rwt`) and USDC from
+#                               (`.mints.usdc`). Either env override still
+#                               works (operator wins) but neither is
+#                               required. Rewrites go into the
+#                               `#[cfg(feature = "devnet")]` branch of each
+#                               constant — if the branch doesn't exist yet,
+#                               the script splits the flat block into
+#                               devnet+mainnet branches on first run; on
+#                               subsequent runs the existing devnet branch
+#                               is updated in-place. The mainnet branch
+#                               (`#[cfg(not(feature = "devnet"))]`) is
+#                               NEVER touched.
+#                               Build runs WITH `--features devnet`.
+#                               Sentinel: data/r20-migrated.devnet.json.
+#                               Optional redeploy when RPC_URL is set.
+#
+# Required env (per-cluster):
+#   CLUSTER=mainnet → RWT_MINT_PUBKEY, USDC_MINT_PUBKEY
+#   CLUSTER=devnet  → none required; ADDRESSES is the source of truth.
+#
+# Optional env (any cluster):
+#   ADDRESSES=<path>   Override input JSON. Defaults:
+#                        mainnet → (no input JSON, env-only)
+#                        devnet  → data/devnet-addresses.json
+#   SENTINEL=<path>    Override sentinel output path. Defaults:
+#                        mainnet → data/r20-migrated.json
+#                        devnet  → data/r20-migrated.devnet.json
+#   RPC_URL=<url>      Devnet only: after rebuild, `solana program deploy`
+#                      YD/DEX/OT to this URL using the upgrade authority
+#                      (deployer keypair at keys/devnet/deployer.json).
+#                      Mainnet runs ignore RPC_URL — mainnet ceremony uses
+#                      a separate redeploy step in scripts/deploy.sh.
+#
+# Behavior (unchanged for mainnet path):
 #   1. Validates env vars match Solana base58 alphabet (32-44 char range).
 #   2. Decodes both pubkeys to [u8; 32] byte arrays (rejects non-32-byte).
 #   3. Backs up the 3 constants.rs files to data/<crate>-constants.rs.bak.<ts>.
 #   4. In-place replaces RWT_MINT (3 files) + USDC_MINT (yield-distribution
-#      only — DEX has a placeholder pattern that the patcher tolerates,
-#      OT has no USDC_MINT const at all).
+#      only). For mainnet, edits the flat block; for devnet, edits the
+#      `#[cfg(feature = "devnet")]` branch (splitting the flat block on
+#      first migration).
 #   5. Re-reads each file and asserts the new bytes round-trip equal to
 #      the requested input byte-for-byte.
-#   6. Runs `cargo build-sbf` for each of the 3 crates. yield-distribution
-#      is rebuilt WITHOUT `dev-placeholder-mints` so the R20 tripwire
-#      fires on bad input. On any build failure the trap restores ALL 3
-#      backups.
+#   6. Runs `cargo build-sbf` (mainnet) or `cargo build-sbf --features devnet`
+#      (devnet) for each of the 3 crates. yield-distribution mainnet path
+#      is rebuilt WITHOUT `dev-placeholder-mints` so the R20 tripwire fires
+#      on bad input. On any build failure the trap restores ALL 3 backups.
 #   7. Verifies the 3 .so artifacts exist post-build:
 #        contracts/target/deploy/yield_distribution.so
 #        contracts/target/deploy/native_dex.so
 #        contracts/target/deploy/ownership_token.so
-#   8. Emits data/r20-migrated.json sentinel (v2 schema with per-contract
-#      pin metadata) + echoes a confirmation line.
+#   8. Emits the sentinel JSON (path depends on CLUSTER) + echoes confirmation.
+#   9. Devnet only, when RPC_URL is set: invokes `solana program deploy
+#      --program-id keys/devnet/<contract>.json --keypair
+#      keys/devnet/deployer.json --url $RPC_URL <so>` for YD, DEX, OT.
 #
 # Idempotency:
-#   If data/r20-migrated.json already exists with matching pubkeys, the
-#   script no-ops and echoes "already migrated".
+#   If sentinel already exists with matching pubkeys, the script no-ops
+#   and echoes "already migrated".
 #
 # Concurrency:
 #   flock on data/migrate-mints.lock guards against concurrent runs.
@@ -65,7 +108,27 @@ CONSTANTS_FILES=(
   "$ROOT_DIR/contracts/native-dex/src/constants.rs"
   "$ROOT_DIR/contracts/ownership-token/src/constants.rs"
 )
-SENTINEL_FILE="$DATA_DIR/r20-migrated.json"
+
+# Cluster selection. Default to mainnet so existing operators see no
+# behavior change unless they explicitly opt in to the devnet path.
+CLUSTER="${CLUSTER:-mainnet}"
+case "$CLUSTER" in
+  mainnet|devnet) ;;
+  *) echo "ERROR: CLUSTER must be 'mainnet' or 'devnet'; got '$CLUSTER'" >&2; exit 1 ;;
+esac
+
+# Per-cluster defaults for input/output paths.
+if [[ "$CLUSTER" == "devnet" ]]; then
+  ADDRESSES_DEFAULT="$DATA_DIR/devnet-addresses.json"
+  SENTINEL_DEFAULT="$DATA_DIR/r20-migrated.devnet.json"
+else
+  ADDRESSES_DEFAULT=""
+  SENTINEL_DEFAULT="$DATA_DIR/r20-migrated.json"
+fi
+ADDRESSES="${ADDRESSES:-$ADDRESSES_DEFAULT}"
+SENTINEL_FILE="${SENTINEL:-$SENTINEL_DEFAULT}"
+RPC_URL="${RPC_URL:-}"
+
 LOCK_FILE="$DATA_DIR/migrate-mints.lock"
 LOG_FILE="$DATA_DIR/migrate-mints.log"
 BUILD_ARTIFACTS=(
@@ -73,6 +136,8 @@ BUILD_ARTIFACTS=(
   "$ROOT_DIR/contracts/target/deploy/native_dex.so"
   "$ROOT_DIR/contracts/target/deploy/ownership_token.so"
 )
+DEVNET_KEY_DIR="$ROOT_DIR/keys/devnet"
+DEVNET_DEPLOYER_KP="$DEVNET_KEY_DIR/deployer.json"
 
 mkdir -p "$DATA_DIR"
 
@@ -128,6 +193,31 @@ validate_base58() {
 if ! python3 -c "import base58" >/dev/null 2>&1; then
   echo "ERROR: python3 'base58' module missing. Install with: pip3 install base58" >&2
   exit 1
+fi
+
+# Devnet: source unset RWT/USDC pubkeys from the addresses JSON so
+# operators don't have to retype them. Env overrides still win, mirroring
+# the mainnet ergonomics (env-as-source-of-truth).
+if [[ "$CLUSTER" == "devnet" ]]; then
+  if [[ -z "${RWT_MINT_PUBKEY:-}" || -z "${USDC_MINT_PUBKEY:-}" ]]; then
+    if [[ ! -f "$ADDRESSES" ]]; then
+      echo "ERROR: CLUSTER=devnet requires ADDRESSES JSON ($ADDRESSES) or" >&2
+      echo "       explicit RWT_MINT_PUBKEY + USDC_MINT_PUBKEY env vars" >&2
+      exit 1
+    fi
+    if [[ -z "${RWT_MINT_PUBKEY:-}" ]]; then
+      RWT_MINT_PUBKEY="$(python3 -c "import json; d=json.load(open('$ADDRESSES')); print(d.get('mints',{}).get('rwt') or '')")"
+    fi
+    if [[ -z "${USDC_MINT_PUBKEY:-}" ]]; then
+      USDC_MINT_PUBKEY="$(python3 -c "import json; d=json.load(open('$ADDRESSES')); print(d.get('mints',{}).get('usdc') or '')")"
+    fi
+    if [[ -z "$RWT_MINT_PUBKEY" || -z "$USDC_MINT_PUBKEY" ]]; then
+      echo "ERROR: CLUSTER=devnet: ADDRESSES JSON $ADDRESSES missing .mints.rwt or .mints.usdc" >&2
+      echo "       run scripts/deploy-devnet.sh after mint creation to populate these fields" >&2
+      exit 1
+    fi
+    export RWT_MINT_PUBKEY USDC_MINT_PUBKEY
+  fi
 fi
 
 require_env RWT_MINT_PUBKEY
@@ -243,54 +333,159 @@ stage_start "rewrite-constants"
 # In-place replace RWT_MINT in all 3 files; USDC_MINT in yield-distribution
 # only (native-dex carries a USDC placeholder pattern but the contract
 # treats it as a vanity-byte sentinel; ownership-token has no USDC_MINT
-# const). Regex requires line-anchored `^pub const ...` so it cannot match
-# an inline reference inside a comment or test fixture. After each rewrite
-# the script re-reads the file and asserts the new byte body matches the
-# requested input byte-for-byte.
+# const).
+#
+# Mainnet path (CLUSTER=mainnet): edits the flat `pub const RWT_MINT/
+# USDC_MINT` block in place. Identical to pre-CLUSTER-parameterization
+# behavior.
+#
+# Devnet path (CLUSTER=devnet): edits ONLY the `#[cfg(feature = "devnet")]`
+# branch of each constant. If no devnet branch exists yet (the file still
+# has a flat block from a fresh checkout), the patcher splits the flat
+# block into devnet/not(devnet) branches on first run; on subsequent runs
+# the existing devnet branch is updated and the mainnet branch is left
+# untouched. Regex requires line-anchored `^pub const ...` (or
+# `^#[cfg(...)]`) so it cannot match an inline reference inside a comment
+# or test fixture. After each rewrite the script re-reads the file and
+# asserts the new byte body matches the requested input byte-for-byte.
 for src in "${CONSTANTS_FILES[@]}"; do
   crate_name="$(basename "$(dirname "$(dirname "$src")")")"
-  log "rewriting $crate_name/src/constants.rs (RWT_MINT)"
-  python3 - "$src" "$RWT_BYTES" <<'PY'
+  log "rewriting $crate_name/src/constants.rs (RWT_MINT, cluster=$CLUSTER)"
+  python3 - "$src" "$RWT_BYTES" "$CLUSTER" <<'PY'
 import re, sys
-path, rwt_bytes_str = sys.argv[1], sys.argv[2]
+path, rwt_bytes_str, cluster = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     src = f.read()
 
-def sub_const(name, body, text):
+def patch_flat(name, body, text):
+    """Edit a flat `pub const NAME: [u8; 32] = [...];` block in place."""
     pattern = re.compile(
         r'(?m)^(pub const ' + re.escape(name) + r': \[u8; 32\] = \[)[^\]]*?(\];)',
         re.DOTALL,
     )
     new_block = r'\1\n' + body + r'\n\2'
-    out, n = pattern.subn(new_block, text, count=1)
-    return out, n
+    return pattern.subn(new_block, text, count=1)
 
-src, n = sub_const("RWT_MINT", rwt_bytes_str, src)
+def patch_devnet_branch(name, body, text):
+    """Edit only the `#[cfg(feature = "devnet")] pub const NAME ...` branch.
+
+    Returns (new_text, n) where n is the number of substitutions made.
+    Returns n=0 if no devnet branch is present (caller should fall back
+    to split-flat-block).
+    """
+    pattern = re.compile(
+        r'(?m)^(#\[cfg\(feature\s*=\s*"devnet"\)\]\s*\npub const '
+        + re.escape(name)
+        + r': \[u8; 32\] = \[)[^\]]*?(\];)',
+        re.DOTALL,
+    )
+    new_block = r'\1\n' + body + r'\n\2'
+    return pattern.subn(new_block, text, count=1)
+
+def split_flat_into_branches(name, devnet_body, text):
+    """Convert a flat `pub const NAME: [u8;32] = [old_bytes];` block into:
+
+        #[cfg(feature = "devnet")]
+        pub const NAME: [u8; 32] = [
+            <devnet_body>
+        ];
+        #[cfg(not(feature = "devnet"))]
+        pub const NAME: [u8; 32] = [
+            <old_body>
+        ];
+
+    The original (mainnet) bytes are preserved in the `cfg(not(devnet))`
+    branch — this is the FIRST-RUN devnet path that converts a previously
+    cluster-agnostic constants.rs into a dual-cluster file.
+    """
+    pattern = re.compile(
+        r'(?m)^pub const ' + re.escape(name) + r': \[u8; 32\] = \[([^\]]+?)\];',
+        re.DOTALL,
+    )
+    m = pattern.search(text)
+    if not m:
+        return text, 0
+    old_body = m.group(1).rstrip('\n').lstrip('\n')
+    replacement = (
+        '#[cfg(feature = "devnet")]\n'
+        f'pub const {name}: [u8; 32] = [\n'
+        f'{devnet_body}\n'
+        '];\n'
+        '#[cfg(not(feature = "devnet"))]\n'
+        f'pub const {name}: [u8; 32] = [{old_body}];'
+    )
+    return pattern.sub(replacement, text, count=1), 1
+
+if cluster == "devnet":
+    # Try edit the existing devnet branch; if absent, split the flat block.
+    out, n = patch_devnet_branch("RWT_MINT", rwt_bytes_str, src)
+    if n == 0:
+        out, n = split_flat_into_branches("RWT_MINT", rwt_bytes_str, src)
+else:
+    out, n = patch_flat("RWT_MINT", rwt_bytes_str, src)
+
 if n != 1:
-    sys.stderr.write(f"FATAL: RWT_MINT not patched in {path}\n")
+    sys.stderr.write(f"FATAL: RWT_MINT not patched in {path} (cluster={cluster})\n")
     sys.exit(1)
 with open(path, "w") as f:
-    f.write(src)
+    f.write(out)
 PY
 
   # USDC_MINT patch only for yield-distribution (native-dex placeholder is
   # a vanity-byte sentinel kept untouched; OT has no USDC_MINT const).
   if [[ "$crate_name" == "yield-distribution" ]]; then
-    log "rewriting $crate_name/src/constants.rs (USDC_MINT)"
-    python3 - "$src" "$USDC_BYTES" <<'PY'
+    log "rewriting $crate_name/src/constants.rs (USDC_MINT, cluster=$CLUSTER)"
+    python3 - "$src" "$USDC_BYTES" "$CLUSTER" <<'PY'
 import re, sys
-path, usdc_bytes_str = sys.argv[1], sys.argv[2]
+path, usdc_bytes_str, cluster = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     src = f.read()
 
-pattern = re.compile(
-    r'(?m)^(pub const USDC_MINT: \[u8; 32\] = \[)[^\]]*?(\];)',
-    re.DOTALL,
-)
-new_block = r'\1\n' + usdc_bytes_str + r'\n\2'
-out, n = pattern.subn(new_block, src, count=1)
+def patch_flat(text):
+    pattern = re.compile(
+        r'(?m)^(pub const USDC_MINT: \[u8; 32\] = \[)[^\]]*?(\];)',
+        re.DOTALL,
+    )
+    new_block = r'\1\n' + usdc_bytes_str + r'\n\2'
+    return pattern.subn(new_block, text, count=1)
+
+def patch_devnet_branch(text):
+    pattern = re.compile(
+        r'(?m)^(#\[cfg\(feature\s*=\s*"devnet"\)\]\s*\npub const '
+        r'USDC_MINT: \[u8; 32\] = \[)[^\]]*?(\];)',
+        re.DOTALL,
+    )
+    new_block = r'\1\n' + usdc_bytes_str + r'\n\2'
+    return pattern.subn(new_block, text, count=1)
+
+def split_flat_into_branches(text):
+    pattern = re.compile(
+        r'(?m)^pub const USDC_MINT: \[u8; 32\] = \[([^\]]+?)\];',
+        re.DOTALL,
+    )
+    m = pattern.search(text)
+    if not m:
+        return text, 0
+    old_body = m.group(1).rstrip('\n').lstrip('\n')
+    replacement = (
+        '#[cfg(feature = "devnet")]\n'
+        'pub const USDC_MINT: [u8; 32] = [\n'
+        f'{usdc_bytes_str}\n'
+        '];\n'
+        '#[cfg(not(feature = "devnet"))]\n'
+        f'pub const USDC_MINT: [u8; 32] = [{old_body}];'
+    )
+    return pattern.sub(replacement, text, count=1), 1
+
+if cluster == "devnet":
+    out, n = patch_devnet_branch(src)
+    if n == 0:
+        out, n = split_flat_into_branches(src)
+else:
+    out, n = patch_flat(src)
+
 if n != 1:
-    sys.stderr.write(f"FATAL: USDC_MINT not patched in {path}\n")
+    sys.stderr.write(f"FATAL: USDC_MINT not patched in {path} (cluster={cluster})\n")
     sys.exit(1)
 with open(path, "w") as f:
     f.write(out)
@@ -302,17 +497,36 @@ stage_end
 stage_start "verify-bytes"
 # Post-write byte verification: re-read each file and assert the body
 # matches what we asked for. Defends against regex over-match silently
-# editing the wrong block.
+# editing the wrong block. For CLUSTER=devnet the check targets the
+# `#[cfg(feature = "devnet")]` branch; for CLUSTER=mainnet it targets
+# the flat block (or the `cfg(not(devnet))` branch — same regex catches
+# either because the `#[cfg(...)]` line is optional).
 for src in "${CONSTANTS_FILES[@]}"; do
   crate_name="$(basename "$(dirname "$(dirname "$src")")")"
-  python3 - "$src" "$RWT_MINT_PUBKEY" <<'PY'
+  python3 - "$src" "$RWT_MINT_PUBKEY" "$CLUSTER" <<'PY'
 import re, sys, base58
-path, rwt_pk = sys.argv[1], sys.argv[2]
+path, rwt_pk, cluster = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     src = f.read()
-m = re.search(r'pub const RWT_MINT: \[u8; 32\] = \[([^\]]+)\];', src)
-if not m:
-    sys.exit(f"RWT_MINT pattern missing post-write in {path}")
+
+if cluster == "devnet":
+    # Match only the devnet branch.
+    m = re.search(
+        r'#\[cfg\(feature\s*=\s*"devnet"\)\]\s*\n'
+        r'pub const RWT_MINT: \[u8; 32\] = \[([^\]]+)\];',
+        src,
+    )
+    if not m:
+        sys.exit(f"RWT_MINT devnet branch missing post-write in {path}")
+else:
+    # Mainnet — match either a flat block or the `cfg(not(devnet))` branch.
+    m = re.search(
+        r'(?m)^(?:#\[cfg\(not\(feature\s*=\s*"devnet"\)\)\]\s*\n)?'
+        r'pub const RWT_MINT: \[u8; 32\] = \[([^\]]+)\];',
+        src,
+    )
+    if not m:
+        sys.exit(f"RWT_MINT pattern missing post-write in {path}")
 bytes_text = m.group(1)
 nums = [int(b.strip().replace("0x", ""), 16) for b in bytes_text.replace(",", " ").split() if b.strip()]
 expected = list(base58.b58decode(rwt_pk))
@@ -323,14 +537,27 @@ PY
 done
 
 # yield-distribution USDC verify (only file with USDC_MINT pinned).
-python3 - "${CONSTANTS_FILES[0]}" "$USDC_MINT_PUBKEY" <<'PY'
+python3 - "${CONSTANTS_FILES[0]}" "$USDC_MINT_PUBKEY" "$CLUSTER" <<'PY'
 import re, sys, base58
-path, usdc_pk = sys.argv[1], sys.argv[2]
+path, usdc_pk, cluster = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     src = f.read()
-m = re.search(r'pub const USDC_MINT: \[u8; 32\] = \[([^\]]+)\];', src)
-if not m:
-    sys.exit(f"USDC_MINT pattern missing in {path}")
+if cluster == "devnet":
+    m = re.search(
+        r'#\[cfg\(feature\s*=\s*"devnet"\)\]\s*\n'
+        r'pub const USDC_MINT: \[u8; 32\] = \[([^\]]+)\];',
+        src,
+    )
+    if not m:
+        sys.exit(f"USDC_MINT devnet branch missing in {path}")
+else:
+    m = re.search(
+        r'(?m)^(?:#\[cfg\(not\(feature\s*=\s*"devnet"\)\)\]\s*\n)?'
+        r'pub const USDC_MINT: \[u8; 32\] = \[([^\]]+)\];',
+        src,
+    )
+    if not m:
+        sys.exit(f"USDC_MINT pattern missing in {path}")
 bytes_text = m.group(1)
 nums = [int(b.strip().replace("0x", ""), 16) for b in bytes_text.replace(",", " ").split() if b.strip()]
 expected = list(base58.b58decode(usdc_pk))
@@ -341,22 +568,35 @@ log "  yield-distribution USDC_MINT bytes verified"
 stage_end
 
 stage_start "rebuild-sbf"
-log "rebuilding 3 R20-pinned contracts"
+log "rebuilding 3 R20-pinned contracts (cluster=$CLUSTER)"
 for src in "${CONSTANTS_FILES[@]}"; do
   crate_dir="$(dirname "$(dirname "$src")")"
   crate_name="$(basename "$crate_dir")"
   log "  cargo build-sbf $crate_name"
   (
     cd "$crate_dir"
-    if [[ "$crate_name" == "yield-distribution" ]]; then
-      # YD uses dev-placeholder-mints feature in development; rebuild
-      # WITHOUT it post-R20 so the compile-time tripwire fires if the
-      # placeholder bytes survived the rewrite.
-      cargo clean -p yield-distribution >>"$LOG_FILE" 2>&1 || true
-      cargo build-sbf >>"$LOG_FILE" 2>&1
+    if [[ "$CLUSTER" == "devnet" ]]; then
+      # Devnet build: opt in to the cluster feature flag. yield-distribution
+      # additionally needs `dev-placeholder-mints` because the post-rewrite
+      # devnet branch is freshly written (not yet treated as a "real"
+      # production pin by the R20 tripwire). Mainnet path stays unchanged.
+      if [[ "$crate_name" == "yield-distribution" ]]; then
+        cargo clean -p yield-distribution >>"$LOG_FILE" 2>&1 || true
+        cargo build-sbf --features devnet,dev-placeholder-mints >>"$LOG_FILE" 2>&1
+      else
+        cargo build-sbf --features devnet >>"$LOG_FILE" 2>&1
+      fi
     else
-      # native-dex + ownership-token have no feature flag; standard build.
-      cargo build-sbf >>"$LOG_FILE" 2>&1
+      if [[ "$crate_name" == "yield-distribution" ]]; then
+        # YD uses dev-placeholder-mints feature in development; rebuild
+        # WITHOUT it post-R20 so the compile-time tripwire fires if the
+        # placeholder bytes survived the rewrite.
+        cargo clean -p yield-distribution >>"$LOG_FILE" 2>&1 || true
+        cargo build-sbf >>"$LOG_FILE" 2>&1
+      else
+        # native-dex + ownership-token have no feature flag; standard build.
+        cargo build-sbf >>"$LOG_FILE" 2>&1
+      fi
     fi
   ) || { log "ERROR: cargo build-sbf failed for $crate_name"; exit 1; }
 done
@@ -368,17 +608,48 @@ for so in "${BUILD_ARTIFACTS[@]}"; do
 done
 stage_end
 
+# Optional: devnet redeploy. When RPC_URL is set and CLUSTER=devnet, push
+# the freshly built .so files to the on-chain program IDs using the devnet
+# deployer keypair. Skipped in mainnet mode — mainnet ceremony uses a
+# separate redeploy step in scripts/deploy.sh::redeploy_r20_contracts.
+if [[ "$CLUSTER" == "devnet" && -n "$RPC_URL" ]]; then
+  stage_start "devnet-redeploy"
+  [[ -f "$DEVNET_DEPLOYER_KP" ]] || { log "ERROR: devnet deployer keypair missing: $DEVNET_DEPLOYER_KP"; exit 1; }
+
+  # Short-name -> .so filename + keypair filename. Matches deploy-devnet.sh.
+  declare -A DEVNET_REDEPLOY_SO=(
+    [yield-distribution]="yield_distribution.so"
+    [native-dex]="native_dex.so"
+    [ownership-token]="ownership_token.so"
+  )
+  for short in yield-distribution native-dex ownership-token; do
+    so="$ROOT_DIR/contracts/target/deploy/${DEVNET_REDEPLOY_SO[$short]}"
+    kp="$DEVNET_KEY_DIR/${short}.json"
+    [[ -f "$kp" ]] || { log "ERROR: missing devnet program keypair $kp"; exit 1; }
+    log "  redeploying $short -> $(solana-keygen pubkey "$kp") via $RPC_URL"
+    solana program deploy \
+      --url "$RPC_URL" \
+      --keypair "$DEVNET_DEPLOYER_KP" \
+      --program-id "$kp" \
+      "$so" >>"$LOG_FILE" 2>&1 \
+      || { log "ERROR: redeploy failed for $short; see $LOG_FILE"; exit 1; }
+    log "    $short redeploy OK"
+  done
+  stage_end
+fi
+
 # Mutation succeeded; flag so cleanup trap doesn't restore the backups.
 MIGRATION_OK=1
 
 stage_start "sentinel"
 log "writing sentinel: $SENTINEL_FILE"
 TS_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-python3 - "$SENTINEL_FILE" "$RWT_MINT_PUBKEY" "$USDC_MINT_PUBKEY" "$TS_UTC" <<'PY'
+python3 - "$SENTINEL_FILE" "$RWT_MINT_PUBKEY" "$USDC_MINT_PUBKEY" "$TS_UTC" "$CLUSTER" <<'PY'
 import json, sys
-path, rwt, usdc, ts = sys.argv[1:5]
+path, rwt, usdc, ts, cluster = sys.argv[1:6]
 sentinel = {
     "schema_version": 2,
+    "cluster": cluster,
     "rwt": rwt,
     "usdc": usdc,
     "migrated_at": ts,
@@ -395,4 +666,4 @@ PY
 chmod 600 "$SENTINEL_FILE"
 stage_end
 
-log "R20 closed: RWT=$RWT_MINT_PUBKEY, USDC=$USDC_MINT_PUBKEY (3 contracts pinned)"
+log "R20 closed (cluster=$CLUSTER): RWT=$RWT_MINT_PUBKEY, USDC=$USDC_MINT_PUBKEY (3 contracts pinned)"
