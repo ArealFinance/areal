@@ -1,0 +1,117 @@
+/*
+ * Global reset + body styles for app-earn.
+ * Tokens come from ./tokens.css (imported in +layout.svelte).
+ *
+ * Philosophy: minimal reset, no normalize.css bloat, mobile-first.
+ */
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+}
+
+html {
+	-webkit-text-size-adjust: 100%;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+body {
+	min-height: 100vh;
+	min-height: 100dvh;
+	background: var(--color-bg);
+	color: var(--color-text);
+	font-family: var(--font-body);
+	font-size: var(--text-base);
+	line-height: var(--leading-normal);
+	letter-spacing: var(--tracking-tight);
+}
+
+/* Subtle aurora wash on the page background so the dark surface doesn't feel flat. */
+body::before {
+	content: '';
+	position: fixed;
+	inset: 0;
+	background:
+		radial-gradient(ellipse 80% 60% at 50% -10%, rgba(165, 110, 255, 0.18) 0%, transparent 70%),
+		radial-gradient(ellipse 60% 40% at 50% 110%, rgba(96, 47, 220, 0.12) 0%, transparent 70%);
+	pointer-events: none;
+	z-index: 0;
+}
+
+#svelte,
+main {
+	position: relative;
+	z-index: 1;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+	margin: 0;
+	font-family: var(--font-sans);
+	font-weight: var(--font-weight-semibold);
+	line-height: var(--leading-tight);
+}
+
+p {
+	margin: 0;
+}
+
+button {
+	font-family: inherit;
+	font-size: inherit;
+	line-height: inherit;
+	border: 0;
+	background: none;
+	color: inherit;
+	cursor: pointer;
+	padding: 0;
+}
+
+button:disabled {
+	cursor: not-allowed;
+	opacity: 0.5;
+}
+
+input {
+	font-family: inherit;
+	font-size: inherit;
+	color: inherit;
+}
+
+a {
+	color: var(--color-primary);
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+/* Focus rings — visible only on keyboard navigation. */
+:focus {
+	outline: none;
+}
+
+:focus-visible {
+	outline: 2px solid var(--color-primary);
+	outline-offset: 2px;
+	border-radius: var(--radius-xs);
+}
+
+/* Reusable utility: always tabular numerals to prevent layout jitter. */
+.tabular {
+	font-variant-numeric: tabular-nums;
+	font-feature-settings: 'tnum' 1;
+}

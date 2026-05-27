@@ -15,6 +15,10 @@
     "dashboard:build": "npm --prefix dashboard run build",
     "dashboard:check": "npm --prefix dashboard run check",
     "dashboard:deploy": "bash scripts/deploy-dashboard.sh",
+    "earn:install": "npm install --prefix app-earn",
+    "earn:dev": "npm --prefix app-earn run dev",
+    "earn:build": "npm --prefix app-earn run build",
+    "earn:check": "npm --prefix app-earn run check",
     "bot:merkle": "npm --prefix bots run merkle:start",
     "bot:rebalancer": "npm --prefix bots run rebalancer:start"
   }
