@@ -2323,7 +2323,14 @@ async function phaseDestinations(
     }
     log('phase-j', `crank USDC owner override: ${crankOwner.toBase58()}`);
   } else {
-    if (art.bootstrap_target !== 'localhost') {
+    // Devnet shares the localhost fallback path: pick the
+    // convert-and-fund-crank bot keypair so the crank USDC ATA is distinct
+    // from areal_fee_destination (deployer's USDC ATA) — required because the
+    // deployer also signs the bootstrap and would otherwise trigger
+    // FeeDestinationCollision in batch_update_destinations. Mainnet still
+    // requires the explicit CRANK_USDC_OWNER_PUBKEY env override so revenue
+    // never lands on a generated bot key.
+    if (art.bootstrap_target !== 'localhost' && art.bootstrap_target !== 'devnet') {
       throw new Error(
         `phase-j FATAL: CRANK_USDC_OWNER_PUBKEY env var is required on non-localhost ` +
           `bootstrap_target="${art.bootstrap_target}". Defaulting to deployer would route ` +
