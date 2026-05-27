@@ -24,11 +24,13 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 CRATES=(yield-distribution futarchy ownership-token rwt-engine native-dex)
 
-# Layer 10 RWT placeholder — first 8 bytes of the placeholder
-# constant in contracts/yield-distribution/src/constants.rs. If any
-# freshly built .so contains this byte sequence verbatim, the build is
+# Layer 10 RWT placeholders — first 8 bytes of each mainnet RWT_MINT
+# byte sequence used across the 4 RWT-bearing contracts:
+#   - 29cdfa852d5ed939 = YD/OT/RWT-engine R20 placeholder (3pBtHBi...)
+#   - fe25034007748910 = native-dex's distinct mainnet RWT pin (J75HniqiQ...)
+# If any freshly built .so contains EITHER sequence, the build is
 # poisoned (the const-rewrite step never ran) and we refuse to ship.
-PLACEHOLDER_HEX='29cdfa852d5ed939'
+PLACEHOLDER_HEXES=('29cdfa852d5ed939' 'fe25034007748910')
 
 log() {
   local ts
@@ -45,17 +47,23 @@ build_one() {
   ) || { log "ERROR: build failed for $crate"; exit 1; }
 }
 
-# Returns 0 if .so is clean, 1 if the placeholder sequence is present.
+# Returns 0 if .so is clean, 1 if any placeholder sequence is present.
 tripwire_check() {
   local so="$1"
   local crate="$2"
   # `xxd -p` outputs lowercase hex with no separators; tr removes the
-  # newlines xxd inserts every 60 chars. grep -q the placeholder pattern.
-  if xxd -p "$so" | tr -d '\n' | grep -qi "$PLACEHOLDER_HEX"; then
-    log "TRIPWIRE  $crate ($so) contains Layer 10 RWT placeholder bytes ($PLACEHOLDER_HEX)"
-    log "          run scripts/migrate-mints.sh CLUSTER=devnet to pin the real mint, then rebuild"
-    return 1
-  fi
+  # newlines xxd inserts every 60 chars. Check against every known
+  # mainnet placeholder pattern (PLACEHOLDER_HEXES array).
+  local so_hex
+  so_hex="$(xxd -p "$so" | tr -d '\n')"
+  local hex
+  for hex in "${PLACEHOLDER_HEXES[@]}"; do
+    if echo "$so_hex" | grep -qi "$hex"; then
+      log "TRIPWIRE  $crate ($so) contains mainnet RWT placeholder bytes ($hex)"
+      log "          run scripts/migrate-mints.sh CLUSTER=devnet to pin the real mint, then rebuild"
+      return 1
+    fi
+  done
   return 0
 }
 
