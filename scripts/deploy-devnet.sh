@@ -25,10 +25,10 @@
 # Subcommands:
 #   status         Show deployer balance + deployment state per program
 #   airdrop        CLI airdrop loop; falls back to web faucet prompt
-#   build          Build all 5 contracts with --features devnet
+#   build          Build all 7 contracts with --features devnet
 #   deploy <c>     Deploy a single contract by short name (yield-distribution,
 #                  futarchy, ownership-token, rwt-engine, native-dex)
-#   deploy-all     Deploy all 5 in smallest-first order (idempotent)
+#   deploy-all     Deploy all 7 in smallest-first order (idempotent)
 #   verify         Run verify-program-ids-devnet.sh + on-chain solana program show
 #   help           Print this header
 
@@ -67,6 +67,8 @@ DEPLOY_ORDER=(
   "ownership-token"
   "rwt-engine"
   "native-dex"
+  "earn"
+  "staking"
 )
 
 # Short-name to JSON key + .so filename mapping. The .so artifact lives at
@@ -78,6 +80,8 @@ declare -A JSON_KEY=(
   [ownership-token]="ownership_token"
   [rwt-engine]="rwt_engine"
   [native-dex]="native_dex"
+  [earn]="earn"
+  [staking]="staking"
 )
 
 declare -A SO_NAME=(
@@ -86,6 +90,8 @@ declare -A SO_NAME=(
   [ownership-token]="ownership_token.so"
   [rwt-engine]="rwt_engine.so"
   [native-dex]="native_dex.so"
+  [earn]="earn.so"
+  [staking]="staking.so"
 )
 
 # ----------------------------------------------------------------------------
@@ -308,7 +314,7 @@ _build_one() {
 
 cmd_build() {
   _assert_tools
-  _info "Building all 5 contracts with --features devnet"
+  _info "Building all 7 contracts with --features devnet"
   for short in "${DEPLOY_ORDER[@]}"; do
     _build_one "$short"
   done
@@ -445,7 +451,7 @@ cmd_deploy_all() {
   _assert_state
   _assert_devnet_rpc
 
-  _info "Deploying all 5 contracts in order: ${DEPLOY_ORDER[*]}"
+  _info "Deploying all 7 contracts in order: ${DEPLOY_ORDER[*]}"
 
   for short in "${DEPLOY_ORDER[@]}"; do
     local key="${JSON_KEY[$short]}"
@@ -503,7 +509,7 @@ cmd_verify() {
   if (( fail > 0 )); then
     _die "$fail/${#DEPLOY_ORDER[@]} program(s) missing on-chain"
   fi
-  _ok "verify complete: all 5 program IDs match source + all 5 programs on-chain"
+  _ok "verify complete: all 7 program IDs match source + all 7 programs on-chain"
 }
 
 # ----------------------------------------------------------------------------
