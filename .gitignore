@@ -14,9 +14,16 @@ node_modules/
 *.pem
 *.key
 
-# === Internal planning (tracked separately in ArealFinance/areal-planning) ===
-plan/
+# === Internal planning (per-machine working drafts — NEVER committed) ===
+# All planning / design / scratch docs live local-only. Tracked separately
+# in ArealFinance/areal-planning if a doc needs sharing.
+# `plan` is a symlink → .areal-planning/plan, so no trailing slash (a
+# trailing slash matches directories only, not the symlink itself).
+plan
+.areal-planning/
 MIGRATION-PLAN.md
+*-plan.md
+*-spec.md
 
 # === OS files ===
 .DS_Store
@@ -34,9 +41,6 @@ blockchain.zip
 # === Claude local config (per-machine) ===
 CLAUDE.local.md
 .claude/
-
-# === Planning documents (per-machine working drafts) ===
-plan/
 
 # === Rust ===
 *.so
