@@ -20,8 +20,10 @@
  *
  * CANONICAL TOKEN ORDER: Meteora sorts the pair by mint-pubkey bytes.
  *   Buffer.compare(earn-RWT, USDC) == 1  =>  tokenX = USDC, tokenY = earn-RWT.
- *   The DLMM "price" is X-per-Y = USDC-per-RWT = the earn NAV (~$1.033). So the
- *   active bin price is set straight from the live NAV, no inversion needed.
+ *   The DLMM "price" (pricePerToken) is tokenY-per-tokenX = RWT-per-USDC = 1/NAV
+ *   (verified on-chain 2026-05-30). So the active bin is set from 1/NAV, and the
+ *   resulting USDC-per-RWT price equals the earn NAV (~$1.033). Passing NAV
+ *   directly here would seed the pool INVERTED (~$0.9657 USDC/RWT) — don't.
  *
  * SAFETY: DEFAULTS TO DRY-RUN. With --dry-run (or no flag) the script reads live
  * state, computes the plan, builds the pool-creation tx and runs
@@ -382,24 +384,33 @@ async function main(): Promise<void> {
         'below assumes tokenX=USDC, tokenY=RWT. Re-derive before proceeding.',
     );
   }
-  // tokenX = USDC, tokenY = earn-RWT. Meteora price = X-per-Y = USDC per RWT = NAV.
+  // ORIENTATION (verified on-chain 2026-05-30): for tokenX=USDC, tokenY=RWT,
+  // Meteora's price (getActiveBin().pricePerToken, and the value the SDK
+  // helpers below consume) is **tokenY-per-tokenX = RWT-per-USDC = 1 / (USDC
+  // per RWT) = 1 / NAV**. A previous version passed NAV directly here, which
+  // seeded the pool at the INVERTED price (~$0.9657 USDC/RWT instead of NAV).
+  // We pass 1/NAV so the resulting USDC-per-RWT price equals NAV.
 
   // --- Live NAV → initial price + active bin ------------------------------
   const capital = await readEarnCapital(conn, earnConfigPda);
   const rwtSupply = await readMintSupply(conn, rwtMint);
   const navMicro = calcNav(capital, rwtSupply); // 6-dec USDC per RWT
-  const navUsd = Number(navMicro) / 1e6; // float price for SDK helpers
+  const navUsd = Number(navMicro) / 1e6; // USDC per RWT (display orientation)
+  const sdkPrice = 1 / navUsd; // RWT per USDC — the SDK/pricePerToken orientation
 
   // pricePerLamport accounts for both mints' decimals; getBinIdFromPrice maps
   // that to the active bin. min=false rounds to the bin whose price floor is
-  // <= NAV (the standard "active bin at this price" choice).
+  // <= the target (the standard "active bin at this price" choice).
   const pricePerLamport = (DLMM as unknown as {
     getPricePerLamport(dx: number, dy: number, p: number): string;
-  }).getPricePerLamport(USDC_DECIMALS, RWT_DECIMALS, navUsd);
+  }).getPricePerLamport(USDC_DECIMALS, RWT_DECIMALS, sdkPrice);
   const activeId = (DLMM as unknown as {
     getBinIdFromPrice(p: string | number, binStep: number, min: boolean): number;
   }).getBinIdFromPrice(pricePerLamport, BIN_STEP_BPS, false);
-  const activeBinPrice = getPriceOfBinByBinId(activeId, BIN_STEP_BPS).toString();
+  // getPriceOfBinByBinId returns the pricePerToken orientation (RWT-per-USDC).
+  // The product-facing USDC-per-RWT price is its inverse.
+  const activeBinPriceRwtPerUsdc = getPriceOfBinByBinId(activeId, BIN_STEP_BPS);
+  const usdcPerRwt = (1 / Number(activeBinPriceRwtPerUsdc)).toFixed(10);
 
   // --- Derived addresses --------------------------------------------------
   const [poolPda, poolBump] = deriveCustomizablePermissionlessLbPair(tokenX, tokenY, DLMM_PROGRAM_ID);
@@ -443,7 +454,7 @@ async function main(): Promise<void> {
   console.log(`bin step:             ${BIN_STEP_BPS} bps`);
   console.log(`base fee:             ${BASE_FEE_BPS} bps`);
   console.log(`live earn NAV:        $${navUsd}  (capital=${capital} / supply=${rwtSupply}, 6-dec=${navMicro})`);
-  console.log(`active bin id:        ${activeId}  (bin price USDC/RWT ≈ ${activeBinPrice})`);
+  console.log(`active bin id:        ${activeId}  (USDC/RWT ≈ ${usdcPerRwt}, raw RWT/USDC ${activeBinPriceRwtPerUsdc})`);
   console.log(`pricePerLamport:      ${pricePerLamport}`);
   console.log('--- seed (POL) ---');
   console.log(`seed USDC (tokenX):   ${SEED_USDC}  (${Number(SEED_USDC) / 1e6} USDC)`);
@@ -647,7 +658,7 @@ async function main(): Promise<void> {
     bin_step_bps: BIN_STEP_BPS,
     base_fee_bps: BASE_FEE_BPS,
     initial_active_id: activeId,
-    initial_price_usdc_per_rwt: activeBinPrice,
+    initial_price_usdc_per_rwt: usdcPerRwt,
     position_pubkey: positionKp.publicKey.toBase58(),
     seed_usdc: SEED_USDC.toString(),
     seed_rwt: SEED_RWT.toString(),
