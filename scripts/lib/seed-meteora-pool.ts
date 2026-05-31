@@ -9,14 +9,36 @@
  * swaps against Meteora directly via @meteora-ag/dlmm (Jupiter does not route
  * devnet; that is a mainnet-only routing bonus, not our code path).
  *
- * VIABILITY (verified, 2026-05-30, @meteora-ag/dlmm@1.9.10):
+ * VIABILITY (verified, 2026-05-30/31, @meteora-ag/dlmm@1.9.10):
  *   - The DLMM program is deployed + executable on devnet at the address above.
  *   - DLMM.createCustomizablePermissionlessLbPair() builds an
  *     `InitializeCustomizablePermissionlessLbPair` ix that SIMULATES CLEANLY on
  *     devnet (sim err: null). This path takes bin step / base fee / active bin
- *     DIRECTLY and needs NO preset-parameter PDA — which matters because devnet
- *     generally lacks the curated preset accounts mainnet has. So we use the
- *     customizable-permissionless path, not createLbPair/createLbPair2.
+ *     DIRECTLY and needs NO preset-parameter PDA. We use it (not
+ *     createLbPair/createLbPair2) for two reasons:
+ *       1. ARBITRARY FEE: it lets us set ANY base fee (here 30 bps = 0.30%). The
+ *          regular createLbPair2 path is bound to on-chain presetParameter2
+ *          accounts, and devnet only exposes baseFactor=10000 / binStep=10
+ *          presets → an unusable ~10% swap fee. The customizable path sidesteps
+ *          that entirely.
+ *       2. MAINNET PARITY: mainnet will create the production pool via this same
+ *          customizable path with the same 30 bps fee.
+ *
+ * POOL ADDRESS DERIVATION (customizable path): the address derives from
+ * (tokenX, tokenY) ONLY — one customizable pool per pair, independent of bin
+ * step / base fee. deriveCustomizablePermissionlessLbPair(tokenX, tokenY,
+ * programId) reproduces it exactly (verified: the burned OLD-pair pool
+ * CVuBA8Jf… derives correctly from the old mints). Because the address depends
+ * only on the mints, a FRESH USDC + FRESH earn-RWT mint pair yields a FRESH
+ * pool address — so the clean re-bootstrap escapes the burned address below.
+ *
+ * BURNED ADDRESS (history): the earlier devnet customizable pool
+ * CVuBA8JfPkqvzNXAebECAR3G7qx2UUCBHoZFbhv7XYQh was seeded INVERTED (price
+ * orientation bug, pre-fix) for the OLD (USDC E4HJu85…, earn-RWT F6Zjyo…) pair,
+ * and is permanently burned at that price (changing bin step does NOT yield a
+ * new address). We briefly pivoted to createLbPair2 to dodge it, but that path's
+ * 10% devnet preset fee made it unusable — hence the return to the customizable
+ * path on a NEW mint pair (fresh address) with the orientation bug FIXED below.
  *
  * CANONICAL TOKEN ORDER: Meteora sorts the pair by mint-pubkey bytes.
  *   Buffer.compare(earn-RWT, USDC) == 1  =>  tokenX = USDC, tokenY = earn-RWT.
@@ -100,12 +122,22 @@ const MINT_SUPPLY_OFFSET = 36; // u64
 const EARN_TOTAL_CAPITAL_OFFSET = 8; // u128 (low 64 + high 64<<64)
 
 // ===== Pool parameters (rationale in the deliverable report) =====
-// Small bin step for a near-$1 stable-ish pair: 25 bps per bin gives ~0.25%
-// price granularity — tight enough for depth, coarse enough that a handful of
-// bins covers a sensible band. Base fee 30 bps (0.30%) is a reasonable swap fee
-// for a test pool. Spot strategy spreads the seed evenly across the band.
+// CUSTOMIZABLE-PERMISSIONLESS path: bin step + base fee are passed DIRECTLY at
+// creation (no preset-parameter account), so we set both here.
+//   - BASE_FEE_BPS = 30 (0.30%): a sensible, usable swap fee for a near-$1 pair.
+//     The regular createLbPair2 path could only reach this via an on-chain
+//     preset, and devnet exposes no such preset (only baseFactor=10000 →  ~10%),
+//     which is why we use the customizable path.
+//   - BIN_STEP_BPS = 25 (0.25% per bin): tight enough for depth on a near-$1
+//     pair, coarse enough that a handful of bins covers a sensible band. NOTE:
+//     the customizable pool ADDRESS does NOT depend on bin step (it derives from
+//     the mints only), so any bin step yields the same pool address — 25 is a
+//     deliberate, documented choice, not an address constraint.
 const BIN_STEP_BPS = 25;
 const BASE_FEE_BPS = 30;
+// Spot strategy spreads the seed evenly across the band. At binStep=25 each bin
+// is ~0.25%, so ±5 bins is a ~2.5% band around NAV — usable depth on both sides
+// of a near-$1 pair.
 const BIN_SPREAD = 5; // bins on EACH side of the active bin (so 11 bins total)
 const LIQUIDITY_SLIPPAGE_PCT = 5; // active-bin slippage tolerance for the seed tx
 
@@ -149,10 +181,11 @@ function stringifyBigInts(v: unknown): unknown {
 interface MeteoraPoolSection {
   program_id?: string;
   pool_address?: string;
+  pool_type?: string; // "customizable_permissionless"
   token_x?: string; // canonical X (USDC)
   token_y?: string; // canonical Y (earn-RWT)
   bin_step_bps?: number;
-  base_fee_bps?: number;
+  base_fee_bps?: number; // base fee set directly at creation (0.30% = 30 bps)
   initial_active_id?: number;
   initial_price_usdc_per_rwt?: string;
   position_pubkey?: string;
@@ -260,6 +293,34 @@ async function accountExists(conn: Connection, addr: PublicKey): Promise<boolean
   return (await conn.getAccountInfo(addr, 'confirmed')) !== null;
 }
 
+/**
+ * Idempotency guard for the pool: returns true only if `addr` already holds a
+ * valid DLMM LbPair account (owned by the DLMM program, plausible LbPair size).
+ * The known LbPair on devnet is 904 bytes; we require the documented size as a
+ * floor so a half-written / wrong account can't be mistaken for the pool.
+ * Throws (does NOT return false) if an account exists at `addr` but is owned by
+ * something else or is too small — that is a hard inconsistency, not a "create
+ * me" signal.
+ */
+const LB_PAIR_ACCOUNT_SIZE = 904;
+async function isValidLbPair(conn: Connection, addr: PublicKey): Promise<boolean> {
+  const info = await conn.getAccountInfo(addr, 'confirmed');
+  if (!info) return false;
+  if (!info.owner.equals(DLMM_PROGRAM_ID)) {
+    throw new Error(
+      `pool address ${addr.toBase58()} exists but is owned by ${info.owner.toBase58()}, ` +
+        `not the DLMM program ${DLMM_PROGRAM_ID.toBase58()}`,
+    );
+  }
+  if (info.data.length < LB_PAIR_ACCOUNT_SIZE) {
+    throw new Error(
+      `pool address ${addr.toBase58()} is DLMM-owned but only ${info.data.length} bytes ` +
+        `(< ${LB_PAIR_ACCOUNT_SIZE}); not a valid LbPair`,
+    );
+  }
+  return true;
+}
+
 // --------------------------------------------------------------------------
 // tx send / simulate
 // --------------------------------------------------------------------------
@@ -354,6 +415,9 @@ async function main(): Promise<void> {
     throw new Error(`deployer keypair ${deployer.publicKey.toBase58()} != addresses.json ${art.deployer.pubkey}`);
   }
 
+  // All token mints + earn config come from the artifact at runtime — NOTHING is
+  // hardcoded. After the clean re-bootstrap (new USDC + new earn-RWT mint) this
+  // script picks up the NEW mints automatically and derives a FRESH pool address.
   const rwtMint = new PublicKey(art.earn.earn_rwt_mint);
   const usdcMint = new PublicKey(art.mints.usdc);
   const earnConfigPda = new PublicKey(art.earn.earn_config_pda);
@@ -413,6 +477,15 @@ async function main(): Promise<void> {
   const usdcPerRwt = (1 / Number(activeBinPriceRwtPerUsdc)).toFixed(10);
 
   // --- Derived addresses --------------------------------------------------
+  // CUSTOMIZABLE-PERMISSIONLESS derivation: the pool address is a function of
+  // (tokenX, tokenY) ONLY (NOT bin step / fee). deriveCustomizablePermissionless-
+  // LbPair reproduces exactly what createCustomizablePermissionlessLbPair seeds
+  // internally — verified reliable (the burned OLD-pair pool CVuBA8Jf… derives
+  // correctly from the old mints). This is UNLIKE the regular createLbPair2 path,
+  // where the standalone derive helper (deriveLbPair2) mismatched the SDK's
+  // internal preset-keyed derivation and produced a non-existent address; the
+  // customizable derive has no such trap. We still VERIFY post-create (under
+  // --execute) that this exact address became a valid LbPair before seeding.
   const [poolPda, poolBump] = deriveCustomizablePermissionlessLbPair(tokenX, tokenY, DLMM_PROGRAM_ID);
   const deployerUsdc = findAta(usdcMint, deployer.publicKey, false);
   const deployerRwt = findAta(rwtMint, deployer.publicKey, false);
@@ -447,12 +520,13 @@ async function main(): Promise<void> {
   console.log(`deployer:             ${deployer.publicKey.toBase58()}`);
   console.log('--- Meteora ---');
   console.log(`DLMM program:         ${DLMM_PROGRAM_ID.toBase58()}`);
+  console.log(`pool type:            customizable_permissionless`);
   console.log(`pool PDA (to create): ${poolPda.toBase58()} (bump ${poolBump})`);
   console.log(`tokenX (canonical):   ${tokenX.toBase58()}  (USDC)`);
   console.log(`tokenY (canonical):   ${tokenY.toBase58()}  (earn-RWT)`);
   console.log('--- pool params ---');
-  console.log(`bin step:             ${BIN_STEP_BPS} bps`);
-  console.log(`base fee:             ${BASE_FEE_BPS} bps`);
+  console.log(`bin step:             ${BIN_STEP_BPS} bps (set directly; does NOT affect pool address)`);
+  console.log(`base fee:             ${BASE_FEE_BPS} bps (0.${BASE_FEE_BPS.toString().padStart(2, '0')}%, set directly)`);
   console.log(`live earn NAV:        $${navUsd}  (capital=${capital} / supply=${rwtSupply}, 6-dec=${navMicro})`);
   console.log(`active bin id:        ${activeId}  (USDC/RWT ≈ ${usdcPerRwt}, raw RWT/USDC ${activeBinPriceRwtPerUsdc})`);
   console.log(`pricePerLamport:      ${pricePerLamport}`);
@@ -572,12 +646,19 @@ async function main(): Promise<void> {
 
   // ========================================================================
   // STEP 3: create the Meteora DLMM pool (customizable-permissionless path).
-  // No preset-parameter PDA required — bin step / fee / active bin are passed
-  // directly, which is the devnet-safe creation path.
+  // No preset-parameter PDA required — bin step / base fee / active bin are
+  // passed DIRECTLY (this is what gives us the 0.30% fee that the preset-bound
+  // createLbPair2 path could not). createCustomizablePermissionlessLbPair
+  // supports both Token and Token-2022 (both our mints are classic SPL Token).
+  //
+  // IDEMPOTENCY: if a valid DLMM LbPair already lives at the resolved address
+  // (e.g. created by a prior, partially-completed --execute run, or the burned
+  // OLD-pair pool when this script runs against the OLD mints), skip creation
+  // and proceed straight to (re)seeding — re-runs are safe.
   // ========================================================================
-  const poolAlreadyExists = await accountExists(conn, poolPda);
+  const poolAlreadyExists = await isValidLbPair(conn, poolPda);
   if (poolAlreadyExists) {
-    warn('create-pool', `pool ${poolPda.toBase58()} already exists — skipping creation, will only (re)seed`);
+    warn('create-pool', `valid LbPair already at ${poolPda.toBase58()} — skipping creation, will only (re)seed`);
   } else {
     const createTx = await (DLMM as unknown as {
       createCustomizablePermissionlessLbPair(
@@ -602,7 +683,7 @@ async function main(): Promise<void> {
       tokenX,
       tokenY,
       new BN(activeId),
-      new BN(BASE_FEE_BPS),
+      new BN(BASE_FEE_BPS), // base fee in bps — 30 = 0.30%
       ActivationType.Timestamp,
       false, // hasAlphaVault
       deployer.publicKey, // creatorKey
@@ -613,7 +694,27 @@ async function main(): Promise<void> {
       { cluster: 'devnet' },
     );
     // Creation tx is built by the SDK; sign with deployer only (no extra signer).
-    await simulateOrSend(conn, createTx, [deployer], execute, 'create Meteora DLMM pool');
+    await simulateOrSend(conn, createTx, [deployer], execute, 'create Meteora DLMM pool (customizable_permissionless)');
+
+    // ADDRESS VERIFICATION: under --execute the create tx is now committed, so
+    // confirm the address we derived (and will seed + journal) is the one the
+    // SDK actually produced — a valid DLMM-owned LbPair. This closes the
+    // derive-mismatch trap that bit the regular createLbPair2 path. In dry-run
+    // the create tx was NOT sent, so the account won't exist yet; we skip the
+    // assertion there (the seed step below already defers in that case).
+    if (execute) {
+      const verified = await isValidLbPair(conn, poolPda);
+      if (!verified) {
+        throw new Error(
+          `post-create verification failed: derived pool ${poolPda.toBase58()} is not a ` +
+            `valid DLMM LbPair after createCustomizablePermissionlessLbPair — the SDK ` +
+            `may have used a different address. Aborting before seed.`,
+        );
+      }
+      log('create-pool', 'verified derived address is a valid LbPair post-create', {
+        pool: poolPda.toBase58(),
+      });
+    }
   }
 
   // ========================================================================
@@ -653,6 +754,7 @@ async function main(): Promise<void> {
   const poolSection: MeteoraPoolSection = {
     program_id: DLMM_PROGRAM_ID.toBase58(),
     pool_address: poolPda.toBase58(),
+    pool_type: 'customizable_permissionless',
     token_x: tokenX.toBase58(),
     token_y: tokenY.toBase58(),
     bin_step_bps: BIN_STEP_BPS,

@@ -94,6 +94,24 @@ declare -A SO_NAME=(
   [staking]="staking.so"
 )
 
+# Program keypair filename override. By default a contract's keypair lives at
+# keys/devnet/<short>.json. The clean earn-stack re-bootstrap (fresh USDC mint)
+# needs brand-new program IDs for earn + staking — their config PDAs are
+# immutable singletons, so a new config demands a new program ID. The old
+# earn.json / staking.json keypairs are kept on disk for later cleanup; live
+# devnet deploys for these two now use the -v2 keypairs.
+declare -A KEY_FILE=(
+  [earn]="earn-v2.json"
+  [staking]="staking-v2.json"
+)
+
+# Resolve the on-disk keypair path for a contract: override map first, else
+# the conventional <short>.json.
+_prog_keypair() {
+  local short="$1"
+  echo "$DEVNET_KEY_DIR/${KEY_FILE[$short]:-${short}.json}"
+}
+
 # ----------------------------------------------------------------------------
 # Logging
 # ----------------------------------------------------------------------------
@@ -332,7 +350,8 @@ _deploy_one() {
   local short="$1"
   local key="${JSON_KEY[$short]}"
   local so="$ROOT_DIR/contracts/target/deploy/${SO_NAME[$short]}"
-  local prog_kp="$DEVNET_KEY_DIR/${short}.json"
+  local prog_kp
+  prog_kp="$(_prog_keypair "$short")"
 
   [[ -f "$so" ]]      || _die "missing artifact $so — run: ./scripts/deploy-devnet.sh build"
   [[ -f "$prog_kp" ]] || _die "missing program keypair $prog_kp"
