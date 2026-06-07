@@ -84,3 +84,13 @@ bots/merkle-publisher/*.db-shm
 # afterwards (per Sec M-2 ESM/CJS interop workaround).
 bots/.audit-lib-driver.cts
 bots/.audit-lib-driver.mts
+
+# Local design mockups — never committed
+mockups/
+
+# === Security audit reports & mainnet cutover plan — NEVER committed (repo is PUBLIC) ===
+# Unfixed findings / cutover planning must not be disclosed publicly. These live
+# in the private ArealFinance/areal-planning repo (.areal-planning/, already ignored).
+/security/
+SECURITY-AUDIT-*.md
+MAINNET-CHECKLIST.md
