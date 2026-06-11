@@ -14,12 +14,14 @@
  *   3. (staking) stRWT mint is NOT pre-created here — staking.initialize
  *      creates it in-handler (CreateAccount + InitializeMint2). We only
  *      generate a fresh signer keypair for it and co-sign the init tx.
- *   4. Create earn's token accounts (USDC basket_vault owned by EarnConfig
- *      PDA, USDC dao_fee_destination owned by deployer). The staking pool_vault
- *      is NOT pre-created — staking.initialize creates it in-handler via the
- *      Associated Token Program CPI.
- *   5. earn.initialize(authority=deployer, pause_authority=deployer).
- *   6. staking.initialize(pause_authority=deployer, reward_depositor=deployer)
+ *   4. Prepare earn's token accounts: dao_fee_destination is an ATA owned by
+ *      deployer; basket_vault is a fresh signer token account owned by
+ *      EarnConfig PDA and created in the same tx as earn.initialize. The
+ *      staking pool_vault is created or accepted by staking.initialize via
+ *      the Associated Token Program CPI.
+ *   5. earn.initialize(authority=deployer, pause_authority_1/2/3) — slot 1
+ *      defaults to deployer; slots 2/3 default to the zero key (unused).
+ *   6. staking.initialize(pause_authority_1/2/3, reward_depositor=deployer)
  *      — authority is taken from the signer, NOT an arg.
  *   7. Journal everything into data/devnet-addresses.json under an `earn`
  *      section (atomic tmp + rename).
@@ -34,8 +36,8 @@
  *     PDA) and the pool_vault (Associated Token Program Create, RWT ATA owned
  *     by the StakingConfig PDA) IN-HANDLER. So the script passes a fresh
  *     strwt_mint signer keypair and the *derived* pool_vault ATA address as a
- *     writable (uninitialized) account — both are populated on-chain by the
- *     handler. Pre-creating either would make the init fail.
+ *     writable account. The handler creates or accepts the canonical
+ *     pool_vault, then validates its mint/owner/program.
  *
  * Safety: DEFAULTS TO DRY-RUN. With --dry-run (or no flag) the script derives
  * everything, prints the plan, builds the txs and runs
@@ -64,8 +66,11 @@ import {
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   MINT_SIZE,
+  ACCOUNT_SIZE,
   getMinimumBalanceForRentExemptMint,
+  getMinimumBalanceForRentExemptAccount,
   createInitializeMint2Instruction,
+  createInitializeAccountInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from '@solana/spl-token';
@@ -102,11 +107,37 @@ const STAKING_INITIALIZE_DISCRIMINATOR = Buffer.from([
   0xaf, 0xaf, 0x6d, 0x1f, 0x0d, 0x98, 0x9b, 0xed,
 ]);
 
+// Account discriminators (from sdk/src/programs/*/accounts.generated.ts).
+const EARN_CONFIG_DISCRIMINATOR = Buffer.from([
+  0x8f, 0x6e, 0x3f, 0xb5, 0x95, 0x8c, 0xbe, 0x90,
+]);
+const STAKING_CONFIG_DISCRIMINATOR = Buffer.from([
+  0x2d, 0x86, 0xfc, 0x52, 0x25, 0x39, 0x54, 0x19,
+]);
+
 // SPL Token mint account layout offsets we need for idempotency reads.
 //   mint_authority option: bytes [0..4) = COption tag, [4..36) = authority
 //   supply: bytes [36..44)
 const MINT_AUTHORITY_TAG_OFFSET = 0;
 const MINT_AUTHORITY_OFFSET = 4;
+
+// EarnConfig layout offsets including the 8-byte Arlex account discriminator.
+// See contracts/earn/src/state.rs (data running offsets:
+// 16,48,80,81,177,178,180,212,244,276,308,316,317 — pause_authorities is
+// [[u8;32];3] at data-offset 81, so every field after it sits +64 vs the old
+// single-guardian layout).
+const EARN_CONFIG_BASKET_VAULT_OFFSET = 8 + 180;
+const EARN_CONFIG_DAO_FEE_DESTINATION_OFFSET = 8 + 212;
+const EARN_CONFIG_RWT_MINT_OFFSET = 8 + 244;
+const EARN_CONFIG_USDC_MINT_OFFSET = 8 + 276;
+
+// StakingConfig layout offsets including the 8-byte Arlex discriminator.
+// See contracts/staking/src/state.rs (data running offsets:
+// 32,64,65,161,162,194,226,258,290,298,306,314,322,323 — pause_authorities is
+// [[u8;32];3] at data-offset 65, shifting every later field +64).
+const STAKING_CONFIG_RWT_MINT_OFFSET = 8 + 162;
+const STAKING_CONFIG_STRWT_MINT_OFFSET = 8 + 194;
+const STAKING_CONFIG_POOL_VAULT_OFFSET = 8 + 258;
 
 // --------------------------------------------------------------------------
 // Logging
@@ -201,26 +232,43 @@ function findAta(owner: PublicKey, mint: PublicKey, allowOwnerOffCurve = false):
 // Instruction encoders (inlined — the published @areal/sdk in bots/
 // node_modules does not yet ship earn/staking; the encoders are trivial
 // discriminator + fixed [u8;32] args). Mirrors the generated bindings:
-//   earn.initialize(authority: [u8;32], pause_authority: [u8;32])
-//   staking.initialize(pause_authority: [u8;32], reward_depositor: [u8;32])
-// (staking's `authority` is the signer account, NOT an arg.)
+//   earn.initialize(authority, pause_authority_1, pause_authority_2, pause_authority_3)
+//   staking.initialize(pause_authority_1, pause_authority_2, pause_authority_3, reward_depositor)
+// The three guardian slots are separate [u8;32] args (Borsh fixed arrays, no
+// length prefix); slot 1 must be non-zero, slots 2/3 may be the zero key
+// (= unused). (staking's `authority` is the signer account, NOT an arg.)
 // --------------------------------------------------------------------------
 
-function encodeEarnInitializeArgs(authority: PublicKey, pauseAuthority: PublicKey): Buffer {
+/** 32-byte zero key — an unused pause guardian slot. */
+const ZERO_KEY = Buffer.alloc(32);
+
+/** Serialize a guardian pubkey (or `null` → zero key) as a Borsh [u8;32]. */
+function encodeGuardian(guardian: PublicKey | null): Buffer {
+  return guardian ? Buffer.from(guardian.toBytes()) : ZERO_KEY;
+}
+
+function encodeEarnInitializeArgs(
+  authority: PublicKey,
+  pauseAuthorities: [PublicKey, PublicKey | null, PublicKey | null],
+): Buffer {
   return Buffer.concat([
     EARN_INITIALIZE_DISCRIMINATOR,
     Buffer.from(authority.toBytes()),
-    Buffer.from(pauseAuthority.toBytes()),
+    encodeGuardian(pauseAuthorities[0]),
+    encodeGuardian(pauseAuthorities[1]),
+    encodeGuardian(pauseAuthorities[2]),
   ]);
 }
 
 function encodeStakingInitializeArgs(
-  pauseAuthority: PublicKey,
+  pauseAuthorities: [PublicKey, PublicKey | null, PublicKey | null],
   rewardDepositor: PublicKey,
 ): Buffer {
   return Buffer.concat([
     STAKING_INITIALIZE_DISCRIMINATOR,
-    Buffer.from(pauseAuthority.toBytes()),
+    encodeGuardian(pauseAuthorities[0]),
+    encodeGuardian(pauseAuthorities[1]),
+    encodeGuardian(pauseAuthorities[2]),
     Buffer.from(rewardDepositor.toBytes()),
   ]);
 }
@@ -231,6 +279,53 @@ const meta = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): Accoun
   isWritable,
 });
 
+/**
+ * Resolve the three pause-guardian slots for earn/staking.initialize.
+ *
+ * Slot 1 is mandatory and defaults to the deployer (backward-compatible with
+ * the previous single-guardian bootstrap). Slots 2/3 are optional, sourced from
+ * `PAUSE_AUTHORITY_2` / `PAUSE_AUTHORITY_3`, and left as the zero key (= unused)
+ * when unset. `PAUSE_AUTHORITY_1` may override slot 1 if a non-deployer guardian
+ * is desired. The on-chain handler rejects a zero slot 1 and duplicate slots, so
+ * we surface those errors early here.
+ */
+function resolveGuardians(
+  deployer: PublicKey,
+): [PublicKey, PublicKey | null, PublicKey | null] {
+  const parseEnv = (name: string): PublicKey | null => {
+    const raw = process.env[name]?.trim();
+    if (!raw) return null;
+    try {
+      return new PublicKey(raw);
+    } catch {
+      throw new Error(`invalid ${name}: ${raw} is not a valid base58 pubkey`);
+    }
+  };
+
+  const slot1 = parseEnv('PAUSE_AUTHORITY_1') ?? deployer;
+  const slot2 = parseEnv('PAUSE_AUTHORITY_2');
+  const slot3 = parseEnv('PAUSE_AUTHORITY_3');
+
+  // Mirror the on-chain duplicate-rejection so a dry-run fails fast.
+  const present = [slot1, slot2, slot3].filter((g): g is PublicKey => g !== null);
+  for (let i = 0; i < present.length; i++) {
+    for (let j = i + 1; j < present.length; j++) {
+      if (present[i]!.equals(present[j]!)) {
+        throw new Error(
+          `duplicate pause guardian ${present[i]!.toBase58()} — slots must be distinct`,
+        );
+      }
+    }
+  }
+
+  return [slot1, slot2, slot3];
+}
+
+/** Render a guardian slot for plan logging (zero/unset → "<unused>"). */
+function guardianLabel(guardian: PublicKey | null): string {
+  return guardian ? guardian.toBase58() : '<unused>';
+}
+
 // --------------------------------------------------------------------------
 // On-chain reads (idempotency)
 // --------------------------------------------------------------------------
@@ -238,6 +333,90 @@ const meta = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): Accoun
 async function accountExists(conn: Connection, addr: PublicKey): Promise<boolean> {
   const info = await conn.getAccountInfo(addr, 'confirmed');
   return info !== null;
+}
+
+async function readTokenAccountAmount(conn: Connection, addr: PublicKey): Promise<bigint | null> {
+  const balance = await conn.getTokenAccountBalance(addr, 'confirmed').catch((e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('could not find account')) return null;
+    throw e;
+  });
+  if (!balance) return null;
+  return BigInt(balance.value.amount);
+}
+
+interface OnchainEarnConfig {
+  basketVault: PublicKey;
+  daoFeeDestination: PublicKey;
+  rwtMint: PublicKey;
+  usdcMint: PublicKey;
+}
+
+interface OnchainStakingConfig {
+  rwtMint: PublicKey;
+  strwtMint: PublicKey;
+  poolVault: PublicKey;
+}
+
+function readPubkeyAt(data: Buffer, offset: number): PublicKey {
+  return new PublicKey(data.subarray(offset, offset + 32));
+}
+
+async function readInitializedConfigData(
+  conn: Connection,
+  addr: PublicKey,
+  programId: PublicKey,
+  discriminator: Buffer,
+  label: string,
+): Promise<Buffer | null> {
+  const info = await conn.getAccountInfo(addr, 'confirmed');
+  if (!info) return null;
+
+  if (info.owner.equals(SYSTEM_PROGRAM_ID)) {
+    warn(
+      'config-prefund',
+      `${label} ${addr.toBase58()} is system-owned; treating it as an uninitialized prefund`,
+    );
+    return null;
+  }
+
+  if (!info.owner.equals(programId)) {
+    throw new Error(
+      `${label} ${addr.toBase58()} owner ${info.owner.toBase58()} != program ${programId.toBase58()}`,
+    );
+  }
+
+  if (
+    info.data.length < discriminator.length ||
+    !Buffer.from(info.data.subarray(0, discriminator.length)).equals(discriminator)
+  ) {
+    throw new Error(`${label} ${addr.toBase58()} has program owner but wrong discriminator`);
+  }
+
+  return Buffer.from(info.data);
+}
+
+function readEarnConfig(data: Buffer, addr: PublicKey): OnchainEarnConfig {
+  if (data.length < EARN_CONFIG_USDC_MINT_OFFSET + 32) {
+    throw new Error(`EarnConfig ${addr.toBase58()} missing or too small to read config fields`);
+  }
+  return {
+    basketVault: readPubkeyAt(data, EARN_CONFIG_BASKET_VAULT_OFFSET),
+    daoFeeDestination: readPubkeyAt(data, EARN_CONFIG_DAO_FEE_DESTINATION_OFFSET),
+    rwtMint: readPubkeyAt(data, EARN_CONFIG_RWT_MINT_OFFSET),
+    usdcMint: readPubkeyAt(data, EARN_CONFIG_USDC_MINT_OFFSET),
+  };
+}
+
+function readStakingConfig(data: Buffer, addr: PublicKey): OnchainStakingConfig {
+  if (data.length < STAKING_CONFIG_POOL_VAULT_OFFSET + 32) {
+    throw new Error(`StakingConfig ${addr.toBase58()} missing or too small to read config fields`);
+  }
+  return {
+    rwtMint: readPubkeyAt(data, STAKING_CONFIG_RWT_MINT_OFFSET),
+    strwtMint: readPubkeyAt(data, STAKING_CONFIG_STRWT_MINT_OFFSET),
+    poolVault: readPubkeyAt(data, STAKING_CONFIG_POOL_VAULT_OFFSET),
+  };
 }
 
 /** Returns the mint authority pubkey of an SPL mint, or null if unset/missing. */
@@ -338,6 +517,11 @@ async function main(): Promise<void> {
     );
   }
 
+  // Pause guardians: slot 1 = deployer (or PAUSE_AUTHORITY_1), slots 2/3 from
+  // PAUSE_AUTHORITY_2 / PAUSE_AUTHORITY_3 (zeroed = unused). Shared by both
+  // earn.initialize and staking.initialize.
+  const pauseAuthorities = resolveGuardians(deployer.publicKey);
+
   const earnProgramId = new PublicKey(art.programs.earn!.pubkey);
   const stakingProgramId = new PublicKey(art.programs.staking!.pubkey);
   const usdcMint = new PublicKey(art.mints.usdc);
@@ -348,31 +532,138 @@ async function main(): Promise<void> {
 
   // --- Mint keypairs (reuse from journal on warm restart) ------------------
   const earnSection: EarnSection = { ...(art.earn ?? {}) };
+  const earnConfigData = await readInitializedConfigData(
+    conn,
+    earnConfigPda,
+    earnProgramId,
+    EARN_CONFIG_DISCRIMINATOR,
+    'EarnConfig',
+  );
+  const earnConfigExists = earnConfigData !== null;
+  const onchainEarnConfig = earnConfigData ? readEarnConfig(earnConfigData, earnConfigPda) : null;
+  const stakingConfigData = await readInitializedConfigData(
+    conn,
+    stakingConfigPda,
+    stakingProgramId,
+    STAKING_CONFIG_DISCRIMINATOR,
+    'StakingConfig',
+  );
+  const stakingConfigExists = stakingConfigData !== null;
+  const onchainStakingConfig = stakingConfigData
+    ? readStakingConfig(stakingConfigData, stakingConfigPda)
+    : null;
+  if (onchainEarnConfig && !onchainEarnConfig.usdcMint.equals(usdcMint)) {
+    throw new Error(
+      `on-chain EarnConfig USDC mint ${onchainEarnConfig.usdcMint.toBase58()} != addresses.json ${usdcMint.toBase58()}`,
+    );
+  }
 
-  let earnRwtMintKp: Keypair;
-  if (earnSection.earn_rwt_mint_keypair_b64) {
+  let earnRwtMintKp: Keypair | null = null;
+  let earnRwtMint: PublicKey;
+  if (onchainEarnConfig) {
+    earnRwtMint = onchainEarnConfig.rwtMint;
+    if (earnSection.earn_rwt_mint && earnSection.earn_rwt_mint !== earnRwtMint.toBase58()) {
+      throw new Error(
+        `earn.earn_rwt_mint ${earnSection.earn_rwt_mint} != on-chain EarnConfig rwt_mint ${earnRwtMint.toBase58()}`,
+      );
+    }
+    if (
+      earnSection.dao_fee_destination &&
+      earnSection.dao_fee_destination !== onchainEarnConfig.daoFeeDestination.toBase58()
+    ) {
+      throw new Error(
+        `earn.dao_fee_destination ${earnSection.dao_fee_destination} != on-chain EarnConfig dao_fee_destination ` +
+          `${onchainEarnConfig.daoFeeDestination.toBase58()}`,
+      );
+    }
+    if (earnSection.earn_rwt_mint_keypair_b64) {
+      const journalMintKp = keypairFromB64(earnSection.earn_rwt_mint_keypair_b64);
+      if (!journalMintKp.publicKey.equals(earnRwtMint)) {
+        throw new Error(
+          `earn_rwt_mint_keypair ${journalMintKp.publicKey.toBase58()} != on-chain EarnConfig rwt_mint ${earnRwtMint.toBase58()}`,
+        );
+      }
+      earnRwtMintKp = journalMintKp;
+    }
+  } else if (earnSection.earn_rwt_mint_keypair_b64) {
     earnRwtMintKp = keypairFromB64(earnSection.earn_rwt_mint_keypair_b64);
+    earnRwtMint = earnRwtMintKp.publicKey;
   } else {
     earnRwtMintKp = Keypair.generate();
+    earnRwtMint = earnRwtMintKp.publicKey;
   }
-  const earnRwtMint = earnRwtMintKp.publicKey;
 
-  let strwtMintKp: Keypair;
-  if (earnSection.strwt_mint_keypair_b64) {
+  if (onchainStakingConfig && !onchainStakingConfig.rwtMint.equals(earnRwtMint)) {
+    throw new Error(
+      `on-chain StakingConfig rwt_mint ${onchainStakingConfig.rwtMint.toBase58()} != earn-RWT mint ${earnRwtMint.toBase58()}`,
+    );
+  }
+
+  let strwtMintKp: Keypair | null = null;
+  let strwtMint: PublicKey;
+  if (onchainStakingConfig) {
+    strwtMint = onchainStakingConfig.strwtMint;
+    if (earnSection.strwt_mint && earnSection.strwt_mint !== strwtMint.toBase58()) {
+      throw new Error(
+        `earn.strwt_mint ${earnSection.strwt_mint} != on-chain StakingConfig strwt_mint ${strwtMint.toBase58()}`,
+      );
+    }
+    if (earnSection.strwt_mint_keypair_b64) {
+      const journalStrwtMintKp = keypairFromB64(earnSection.strwt_mint_keypair_b64);
+      if (!journalStrwtMintKp.publicKey.equals(strwtMint)) {
+        throw new Error(
+          `strwt_mint_keypair ${journalStrwtMintKp.publicKey.toBase58()} != on-chain StakingConfig strwt_mint ${strwtMint.toBase58()}`,
+        );
+      }
+      strwtMintKp = journalStrwtMintKp;
+    }
+  } else if (earnSection.strwt_mint_keypair_b64) {
     strwtMintKp = keypairFromB64(earnSection.strwt_mint_keypair_b64);
+    strwtMint = strwtMintKp.publicKey;
   } else {
     strwtMintKp = Keypair.generate();
+    strwtMint = strwtMintKp.publicKey;
   }
-  const strwtMint = strwtMintKp.publicKey;
 
   // --- Derived token accounts ---------------------------------------------
-  // basket_vault: USDC ATA owned by EarnConfig PDA (off-curve).
-  const basketVault = findAta(earnConfigPda, usdcMint, true);
-  // dao_fee_destination: USDC ATA owned by deployer (devnet revenue placeholder).
-  const daoFeeDestination = findAta(deployer.publicKey, usdcMint, false);
-  // pool_vault: earn-RWT ATA owned by StakingConfig PDA. Created IN-HANDLER by
-  // staking.initialize — we only derive the address to pass it in.
-  const poolVault = findAta(stakingConfigPda, earnRwtMint, true);
+  // basket_vault: fresh USDC token account owned by EarnConfig PDA. Using a
+  // non-ATA signer account keeps the address private until the initialize tx
+  // is submitted, which avoids deterministic-ATA dusting before bootstrap.
+  let basketVaultKp: Keypair | null = null;
+  let basketVault: PublicKey;
+  if (onchainEarnConfig) {
+    basketVault = onchainEarnConfig.basketVault;
+    if (earnSection.basket_vault && earnSection.basket_vault !== basketVault.toBase58()) {
+      throw new Error(
+        `earn.basket_vault ${earnSection.basket_vault} != on-chain EarnConfig basket_vault ${basketVault.toBase58()}`,
+      );
+    }
+  } else if (earnSection.basket_vault) {
+    throw new Error(
+      'earn.basket_vault is journaled while EarnConfig is uninitialized; refusing to reuse a public vault address',
+    );
+  } else {
+    basketVaultKp = Keypair.generate();
+    basketVault = basketVaultKp.publicKey;
+  }
+  // dao_fee_destination: USDC ATA owned by deployer until EarnConfig exists;
+  // after init, read the actual value from on-chain config because it is
+  // tunable via update_config.
+  const daoFeeDestination = onchainEarnConfig?.daoFeeDestination ?? findAta(deployer.publicKey, usdcMint, false);
+  // pool_vault: earn-RWT ATA owned by StakingConfig PDA. Before staking init
+  // it is the canonical derived ATA; after init, read the pinned on-chain value.
+  const canonicalPoolVault = findAta(stakingConfigPda, earnRwtMint, true);
+  const poolVault = onchainStakingConfig?.poolVault ?? canonicalPoolVault;
+  if (onchainStakingConfig && !poolVault.equals(canonicalPoolVault)) {
+    throw new Error(
+      `on-chain StakingConfig pool_vault ${poolVault.toBase58()} != canonical ATA ${canonicalPoolVault.toBase58()}`,
+    );
+  }
+  if (earnSection.pool_vault && earnSection.pool_vault !== poolVault.toBase58()) {
+    throw new Error(
+      `earn.pool_vault ${earnSection.pool_vault} != expected staking pool_vault ${poolVault.toBase58()}`,
+    );
+  }
 
   // --- Plan print ----------------------------------------------------------
   console.log('\n================ bootstrap-earn PLAN ================');
@@ -389,12 +680,20 @@ async function main(): Promise<void> {
   console.log(`earn-RWT mint:        ${earnRwtMint.toBase58()} (auth=earn_config PDA, 6 dec)`);
   console.log(`stRWT mint:           ${strwtMint.toBase58()} (created in-handler, auth=staking_config PDA, 6 dec)`);
   console.log('--- token accounts ---');
-  console.log(`basket_vault (USDC):  ${basketVault.toBase58()} (owner=earn_config PDA)`);
-  console.log(`dao_fee_dest (USDC):  ${daoFeeDestination.toBase58()} (owner=deployer)`);
-  console.log(`pool_vault (earn-RWT):${poolVault.toBase58()} (owner=staking_config PDA, created in-handler)`);
+  console.log(`basket_vault (USDC):  ${basketVault.toBase58()} (fresh token account, owner=earn_config PDA)`);
+  console.log(`dao_fee_dest (USDC):  ${daoFeeDestination.toBase58()} (${onchainEarnConfig ? 'from EarnConfig' : 'owner=deployer'})`);
+  console.log(`pool_vault (earn-RWT):${poolVault.toBase58()} (owner=staking_config PDA, create-idempotent in-handler)`);
   console.log('--- init args ---');
-  console.log(`earn.initialize:      authority=${deployer.publicKey.toBase58()} pause_authority=${deployer.publicKey.toBase58()}`);
-  console.log(`staking.initialize:   pause_authority=${deployer.publicKey.toBase58()} reward_depositor=${deployer.publicKey.toBase58()} (authority=signer=deployer)`);
+  console.log(
+    `earn.initialize:      authority=${deployer.publicKey.toBase58()} ` +
+      `pause_authorities=[${guardianLabel(pauseAuthorities[0])}, ` +
+      `${guardianLabel(pauseAuthorities[1])}, ${guardianLabel(pauseAuthorities[2])}]`,
+  );
+  console.log(
+    `staking.initialize:   pause_authorities=[${guardianLabel(pauseAuthorities[0])}, ` +
+      `${guardianLabel(pauseAuthorities[1])}, ${guardianLabel(pauseAuthorities[2])}] ` +
+      `reward_depositor=${deployer.publicKey.toBase58()} (authority=signer=deployer)`,
+  );
   console.log('=====================================================\n');
 
   // ========================================================================
@@ -404,7 +703,15 @@ async function main(): Promise<void> {
   // ========================================================================
   {
     const existingAuth = await readMintAuthority(conn, earnRwtMint);
-    if (existingAuth) {
+    if (earnConfigExists) {
+      if (!existingAuth || !existingAuth.equals(earnConfigPda)) {
+        throw new Error(
+          `on-chain EarnConfig rwt_mint ${earnRwtMint.toBase58()} has mint authority ` +
+            `${existingAuth?.toBase58() ?? '<none>'} != EarnConfig PDA ${earnConfigPda.toBase58()}`,
+        );
+      }
+      log('mint-earn-rwt', 'skip (EarnConfig already pins existing rwt_mint)');
+    } else if (existingAuth) {
       if (!existingAuth.equals(earnConfigPda)) {
         throw new Error(
           `earn-RWT mint ${earnRwtMint.toBase58()} exists but its mint authority ` +
@@ -415,6 +722,9 @@ async function main(): Promise<void> {
     } else if (await accountExists(conn, earnRwtMint)) {
       throw new Error(`earn-RWT mint ${earnRwtMint.toBase58()} exists but has no mint authority`);
     } else {
+      if (!earnRwtMintKp) {
+        throw new Error('earn-RWT mint keypair unavailable while EarnConfig is uninitialized');
+      }
       const lamports = await getMinimumBalanceForRentExemptMint(conn);
       const tx = new Transaction().add(
         SystemProgram.createAccount({
@@ -437,29 +747,23 @@ async function main(): Promise<void> {
   }
 
   // ========================================================================
-  // Step 4 (earn token accounts): basket_vault + dao_fee_destination.
-  // earn.initialize validates both hold USDC, so they must pre-exist.
-  // Uses createAssociatedTokenAccountIdempotent — safe to re-run.
-  // (The staking pool_vault is NOT created here — staking.initialize creates
-  //  it in-handler.)
+  // Step 4 (earn token accounts): dao_fee_destination.
+  // The basket_vault is intentionally NOT created in a standalone tx. It is a
+  // fresh token-account signer and is created atomically with earn.initialize
+  // below, so no public deterministic address can be dusted before init.
+  // dao_fee_destination is an ordinary deployer-owned ATA and is safe to
+  // create idempotently ahead of time.
   // ========================================================================
   {
     const ixs: TransactionInstruction[] = [];
-    if (!(await accountExists(conn, basketVault))) {
-      ixs.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          deployer.publicKey, // payer
-          basketVault,
-          earnConfigPda, // owner (off-curve PDA)
-          usdcMint,
-          TOKEN_PROGRAM_ID,
-          ASSOCIATED_TOKEN_PROGRAM_ID,
-        ),
-      );
-    } else {
-      log('ata-basket-vault', 'skip (exists)');
-    }
-    if (!(await accountExists(conn, daoFeeDestination))) {
+    if (earnConfigExists) {
+      if (!(await accountExists(conn, daoFeeDestination))) {
+        throw new Error(
+          `on-chain EarnConfig dao_fee_destination ${daoFeeDestination.toBase58()} does not exist`,
+        );
+      }
+      log('ata-dao-fee', 'skip (EarnConfig already pins dao_fee_destination)');
+    } else if (!(await accountExists(conn, daoFeeDestination))) {
       ixs.push(
         createAssociatedTokenAccountIdempotentInstruction(
           deployer.publicKey,
@@ -475,7 +779,7 @@ async function main(): Promise<void> {
     }
     if (ixs.length > 0) {
       const tx = new Transaction().add(...ixs);
-      await simulateOrSend(conn, tx, [deployer], execute, 'create earn token accounts');
+      await simulateOrSend(conn, tx, [deployer], execute, 'create earn DAO fee ATA');
     }
   }
 
@@ -483,7 +787,7 @@ async function main(): Promise<void> {
   // Step 5: earn.initialize
   // Account order (1:1 with contracts/earn/src/instructions/initialize.rs):
   //   0 deployer            signer, writable   (mut, signer)
-  //   1 earn_config         writable           (init — IDL drops the flag)
+  //   1 earn_config         writable           (manual create after validation)
   //   2 rwt_mint            readonly           (= earn-RWT mint)
   //   3 usdc_mint           readonly           (= devnet USDC)
   //   4 basket_vault        readonly
@@ -491,7 +795,7 @@ async function main(): Promise<void> {
   //   6 system_program      readonly
   // ========================================================================
   {
-    if (await accountExists(conn, earnConfigPda)) {
+    if (earnConfigExists) {
       log('earn-initialize', 'skip (EarnConfig PDA already has data)');
     } else if (!execute && !(await accountExists(conn, earnRwtMint))) {
       // Dry-run limitation: simulateTransaction runs each tx independently
@@ -504,7 +808,53 @@ async function main(): Promise<void> {
         'DEFERRED in dry-run — depends on earn-RWT mint created by a prior ' +
           'un-sent tx (would simulate cleanly once that tx is committed under --execute)',
       );
+    } else if (!execute && !(await accountExists(conn, daoFeeDestination))) {
+      // Same dry-run limitation: token accounts may only exist in the prior
+      // simulated tx, not in committed state.
+      log(
+        'earn-initialize',
+        'DEFERRED in dry-run — depends on earn token accounts created by a prior ' +
+          'un-sent tx (would simulate cleanly once that tx is committed under --execute)',
+      );
     } else {
+      const setupIxs: TransactionInstruction[] = [];
+      const signers = [deployer];
+
+      if (await accountExists(conn, basketVault)) {
+        const basketVaultAmount = await readTokenAccountAmount(conn, basketVault);
+        if (basketVaultAmount === null) {
+          throw new Error(`basket_vault ${basketVault.toBase58()} exists but is not a readable token account`);
+        }
+        if (basketVaultAmount !== 0n) {
+          throw new Error(
+            `basket_vault ${basketVault.toBase58()} must be empty before earn.initialize; ` +
+              `found ${basketVaultAmount.toString()} base units`,
+          );
+        }
+        log('basket-vault', 'pre-created vault balance guard OK (amount = 0)');
+      } else {
+        if (!basketVaultKp) {
+          throw new Error('basket_vault keypair unavailable while EarnConfig is uninitialized');
+        }
+        const lamports = await getMinimumBalanceForRentExemptAccount(conn);
+        setupIxs.push(
+          SystemProgram.createAccount({
+            fromPubkey: deployer.publicKey,
+            newAccountPubkey: basketVault,
+            lamports,
+            space: ACCOUNT_SIZE,
+            programId: TOKEN_PROGRAM_ID,
+          }),
+          createInitializeAccountInstruction(
+            basketVault,
+            usdcMint,
+            earnConfigPda,
+            TOKEN_PROGRAM_ID,
+          ),
+        );
+        signers.push(basketVaultKp);
+      }
+
       const keys: AccountMeta[] = [
         meta(deployer.publicKey, true, true),
         meta(earnConfigPda, false, true),
@@ -514,35 +864,36 @@ async function main(): Promise<void> {
         meta(daoFeeDestination, false, false),
         meta(SYSTEM_PROGRAM_ID, false, false),
       ];
-      const data = encodeEarnInitializeArgs(deployer.publicKey, deployer.publicKey);
+      const data = encodeEarnInitializeArgs(deployer.publicKey, pauseAuthorities);
       const ix = new TransactionInstruction({ programId: earnProgramId, keys, data });
-      const tx = new Transaction().add(ix);
-      await simulateOrSend(conn, tx, [deployer], execute, 'earn.initialize');
+      const tx = new Transaction().add(...setupIxs, ix);
+      await simulateOrSend(conn, tx, signers, execute, 'create basket_vault + earn.initialize');
     }
   }
 
   // ========================================================================
   // Step 6: staking.initialize
   // The handler CREATES strwt_mint (System CreateAccount + Token
-  // InitializeMint2) and pool_vault (ATA Create CPI) internally. So:
+  // InitializeMint2) and creates/accepts pool_vault (ATA CreateIdempotent CPI)
+  // internally. So:
   //   - strwt_mint is passed as a FRESH signer keypair (mut, signer); must NOT
   //     pre-exist.
-  //   - pool_vault is passed as the derived (uninitialized) ATA address (mut).
+  //   - pool_vault is passed as the derived canonical ATA address (mut).
   //
   // Account order (1:1 with contracts/staking/src/instructions/initialize.rs):
   //   0 authority       signer, writable  (mut, signer; pays rent; = config.authority)
-  //   1 staking_config  writable          (init — IDL drops the flag)
+  //   1 staking_config  writable          (manual create after validation)
   //   2 rwt_mint        readonly          (= earn-RWT mint; staked token)
   //   3 strwt_mint      signer, writable  (created in-handler)
-  //   4 pool_vault      writable          (created in-handler)
+  //   4 pool_vault      writable          (created or accepted in-handler)
   //   5 token_program   readonly
   //   6 system_program  readonly
   //   7 ata_program     readonly
   //
-  // Args: pause_authority, reward_depositor (authority comes from signer).
+  // Args: pause_authority_1/2/3, reward_depositor (authority comes from signer).
   // ========================================================================
   {
-    if (await accountExists(conn, stakingConfigPda)) {
+    if (stakingConfigExists) {
       log('staking-initialize', 'skip (StakingConfig PDA already has data)');
     } else if (!execute && !(await accountExists(conn, earnRwtMint))) {
       // Dry-run limitation (same as earn.initialize): the earn-RWT mint that
@@ -576,9 +927,12 @@ async function main(): Promise<void> {
         meta(SYSTEM_PROGRAM_ID, false, false),
         meta(ASSOCIATED_TOKEN_PROGRAM_ID, false, false),
       ];
-      const data = encodeStakingInitializeArgs(deployer.publicKey, deployer.publicKey);
+      const data = encodeStakingInitializeArgs(pauseAuthorities, deployer.publicKey);
       const ix = new TransactionInstruction({ programId: stakingProgramId, keys, data });
       const tx = new Transaction().add(ix);
+      if (!strwtMintKp) {
+        throw new Error('stRWT mint keypair unavailable while StakingConfig is uninitialized');
+      }
       await simulateOrSend(conn, tx, [deployer, strwtMintKp], execute, 'staking.initialize');
     }
   }
@@ -593,8 +947,17 @@ async function main(): Promise<void> {
   earnSection.pool_vault = poolVault.toBase58();
   earnSection.earn_config_pda = earnConfigPda.toBase58();
   earnSection.staking_config_pda = stakingConfigPda.toBase58();
-  earnSection.earn_rwt_mint_keypair_b64 = keypairToB64(earnRwtMintKp);
-  earnSection.strwt_mint_keypair_b64 = keypairToB64(strwtMintKp);
+  if (earnRwtMintKp) {
+    earnSection.earn_rwt_mint_keypair_b64 = keypairToB64(earnRwtMintKp);
+  } else {
+    delete earnSection.earn_rwt_mint_keypair_b64;
+  }
+  if (strwtMintKp) {
+    earnSection.strwt_mint_keypair_b64 = keypairToB64(strwtMintKp);
+  } else {
+    delete earnSection.strwt_mint_keypair_b64;
+  }
+  delete (earnSection as EarnSection & { basket_vault_keypair_b64?: string }).basket_vault_keypair_b64;
 
   if (execute) {
     earnSection.bootstrapped_at = new Date().toISOString();
