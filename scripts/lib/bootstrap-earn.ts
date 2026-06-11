@@ -19,10 +19,9 @@
  *      EarnConfig PDA and created in the same tx as earn.initialize. The
  *      staking pool_vault is created or accepted by staking.initialize via
  *      the Associated Token Program CPI.
- *   5. earn.initialize(authority=deployer, pause_authority_1/2/3) — slot 1
- *      defaults to deployer; slots 2/3 default to the zero key (unused).
- *   6. staking.initialize(pause_authority_1/2/3, reward_depositor=deployer)
- *      — authority is taken from the signer, NOT an arg.
+ *   5. earn.initialize(authority=deployer).
+ *   6. staking.initialize(reward_depositor=deployer) — authority is taken
+ *      from the signer, NOT an arg.
  *   7. Journal everything into data/devnet-addresses.json under an `earn`
  *      section (atomic tmp + rename).
  *
@@ -123,21 +122,20 @@ const MINT_AUTHORITY_OFFSET = 4;
 
 // EarnConfig layout offsets including the 8-byte Arlex account discriminator.
 // See contracts/earn/src/state.rs (data running offsets:
-// 16,48,80,81,177,178,180,212,244,276,308,316,317 — pause_authorities is
-// [[u8;32];3] at data-offset 81, so every field after it sits +64 vs the old
-// single-guardian layout).
-const EARN_CONFIG_BASKET_VAULT_OFFSET = 8 + 180;
-const EARN_CONFIG_DAO_FEE_DESTINATION_OFFSET = 8 + 212;
-const EARN_CONFIG_RWT_MINT_OFFSET = 8 + 244;
-const EARN_CONFIG_USDC_MINT_OFFSET = 8 + 276;
+// 16,48,80,81,83,115,147,179,211,219,220).
+const EARN_CONFIG_ACCOUNT_LENGTH = 228;
+const EARN_CONFIG_BASKET_VAULT_OFFSET = 8 + 83;
+const EARN_CONFIG_DAO_FEE_DESTINATION_OFFSET = 8 + 115;
+const EARN_CONFIG_RWT_MINT_OFFSET = 8 + 147;
+const EARN_CONFIG_USDC_MINT_OFFSET = 8 + 179;
 
 // StakingConfig layout offsets including the 8-byte Arlex discriminator.
 // See contracts/staking/src/state.rs (data running offsets:
-// 32,64,65,161,162,194,226,258,290,298,306,314,322,323 — pause_authorities is
-// [[u8;32];3] at data-offset 65, shifting every later field +64).
-const STAKING_CONFIG_RWT_MINT_OFFSET = 8 + 162;
-const STAKING_CONFIG_STRWT_MINT_OFFSET = 8 + 194;
-const STAKING_CONFIG_POOL_VAULT_OFFSET = 8 + 258;
+// 32,64,65,97,129,161,193,201,209,217,225,226).
+const STAKING_CONFIG_ACCOUNT_LENGTH = 234;
+const STAKING_CONFIG_RWT_MINT_OFFSET = 8 + 65;
+const STAKING_CONFIG_STRWT_MINT_OFFSET = 8 + 97;
+const STAKING_CONFIG_POOL_VAULT_OFFSET = 8 + 161;
 
 // --------------------------------------------------------------------------
 // Logging
@@ -232,43 +230,21 @@ function findAta(owner: PublicKey, mint: PublicKey, allowOwnerOffCurve = false):
 // Instruction encoders (inlined — the published @areal/sdk in bots/
 // node_modules does not yet ship earn/staking; the encoders are trivial
 // discriminator + fixed [u8;32] args). Mirrors the generated bindings:
-//   earn.initialize(authority, pause_authority_1, pause_authority_2, pause_authority_3)
-//   staking.initialize(pause_authority_1, pause_authority_2, pause_authority_3, reward_depositor)
-// The three guardian slots are separate [u8;32] args (Borsh fixed arrays, no
-// length prefix); slot 1 must be non-zero, slots 2/3 may be the zero key
-// (= unused). (staking's `authority` is the signer account, NOT an arg.)
+//   earn.initialize(authority)
+//   staking.initialize(reward_depositor)
+// Staking's `authority` is the signer account, NOT an arg.
 // --------------------------------------------------------------------------
 
-/** 32-byte zero key — an unused pause guardian slot. */
-const ZERO_KEY = Buffer.alloc(32);
-
-/** Serialize a guardian pubkey (or `null` → zero key) as a Borsh [u8;32]. */
-function encodeGuardian(guardian: PublicKey | null): Buffer {
-  return guardian ? Buffer.from(guardian.toBytes()) : ZERO_KEY;
-}
-
-function encodeEarnInitializeArgs(
-  authority: PublicKey,
-  pauseAuthorities: [PublicKey, PublicKey | null, PublicKey | null],
-): Buffer {
+function encodeEarnInitializeArgs(authority: PublicKey): Buffer {
   return Buffer.concat([
     EARN_INITIALIZE_DISCRIMINATOR,
     Buffer.from(authority.toBytes()),
-    encodeGuardian(pauseAuthorities[0]),
-    encodeGuardian(pauseAuthorities[1]),
-    encodeGuardian(pauseAuthorities[2]),
   ]);
 }
 
-function encodeStakingInitializeArgs(
-  pauseAuthorities: [PublicKey, PublicKey | null, PublicKey | null],
-  rewardDepositor: PublicKey,
-): Buffer {
+function encodeStakingInitializeArgs(rewardDepositor: PublicKey): Buffer {
   return Buffer.concat([
     STAKING_INITIALIZE_DISCRIMINATOR,
-    encodeGuardian(pauseAuthorities[0]),
-    encodeGuardian(pauseAuthorities[1]),
-    encodeGuardian(pauseAuthorities[2]),
     Buffer.from(rewardDepositor.toBytes()),
   ]);
 }
@@ -278,53 +254,6 @@ const meta = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): Accoun
   isSigner,
   isWritable,
 });
-
-/**
- * Resolve the three pause-guardian slots for earn/staking.initialize.
- *
- * Slot 1 is mandatory and defaults to the deployer (backward-compatible with
- * the previous single-guardian bootstrap). Slots 2/3 are optional, sourced from
- * `PAUSE_AUTHORITY_2` / `PAUSE_AUTHORITY_3`, and left as the zero key (= unused)
- * when unset. `PAUSE_AUTHORITY_1` may override slot 1 if a non-deployer guardian
- * is desired. The on-chain handler rejects a zero slot 1 and duplicate slots, so
- * we surface those errors early here.
- */
-function resolveGuardians(
-  deployer: PublicKey,
-): [PublicKey, PublicKey | null, PublicKey | null] {
-  const parseEnv = (name: string): PublicKey | null => {
-    const raw = process.env[name]?.trim();
-    if (!raw) return null;
-    try {
-      return new PublicKey(raw);
-    } catch {
-      throw new Error(`invalid ${name}: ${raw} is not a valid base58 pubkey`);
-    }
-  };
-
-  const slot1 = parseEnv('PAUSE_AUTHORITY_1') ?? deployer;
-  const slot2 = parseEnv('PAUSE_AUTHORITY_2');
-  const slot3 = parseEnv('PAUSE_AUTHORITY_3');
-
-  // Mirror the on-chain duplicate-rejection so a dry-run fails fast.
-  const present = [slot1, slot2, slot3].filter((g): g is PublicKey => g !== null);
-  for (let i = 0; i < present.length; i++) {
-    for (let j = i + 1; j < present.length; j++) {
-      if (present[i]!.equals(present[j]!)) {
-        throw new Error(
-          `duplicate pause guardian ${present[i]!.toBase58()} — slots must be distinct`,
-        );
-      }
-    }
-  }
-
-  return [slot1, slot2, slot3];
-}
-
-/** Render a guardian slot for plan logging (zero/unset → "<unused>"). */
-function guardianLabel(guardian: PublicKey | null): string {
-  return guardian ? guardian.toBase58() : '<unused>';
-}
 
 // --------------------------------------------------------------------------
 // On-chain reads (idempotency)
@@ -397,8 +326,11 @@ async function readInitializedConfigData(
 }
 
 function readEarnConfig(data: Buffer, addr: PublicKey): OnchainEarnConfig {
-  if (data.length < EARN_CONFIG_USDC_MINT_OFFSET + 32) {
-    throw new Error(`EarnConfig ${addr.toBase58()} missing or too small to read config fields`);
+  if (data.length !== EARN_CONFIG_ACCOUNT_LENGTH) {
+    throw new Error(
+      `EarnConfig ${addr.toBase58()} length ${data.length} != ${EARN_CONFIG_ACCOUNT_LENGTH}; ` +
+        'old paused layouts require a fresh rebootstrap or an explicit migration',
+    );
   }
   return {
     basketVault: readPubkeyAt(data, EARN_CONFIG_BASKET_VAULT_OFFSET),
@@ -409,8 +341,11 @@ function readEarnConfig(data: Buffer, addr: PublicKey): OnchainEarnConfig {
 }
 
 function readStakingConfig(data: Buffer, addr: PublicKey): OnchainStakingConfig {
-  if (data.length < STAKING_CONFIG_POOL_VAULT_OFFSET + 32) {
-    throw new Error(`StakingConfig ${addr.toBase58()} missing or too small to read config fields`);
+  if (data.length !== STAKING_CONFIG_ACCOUNT_LENGTH) {
+    throw new Error(
+      `StakingConfig ${addr.toBase58()} length ${data.length} != ${STAKING_CONFIG_ACCOUNT_LENGTH}; ` +
+        'old paused layouts require a fresh rebootstrap or an explicit migration',
+    );
   }
   return {
     rwtMint: readPubkeyAt(data, STAKING_CONFIG_RWT_MINT_OFFSET),
@@ -516,11 +451,6 @@ async function main(): Promise<void> {
       `deployer keypair ${deployer.publicKey.toBase58()} != addresses.json ${art.deployer.pubkey}`,
     );
   }
-
-  // Pause guardians: slot 1 = deployer (or PAUSE_AUTHORITY_1), slots 2/3 from
-  // PAUSE_AUTHORITY_2 / PAUSE_AUTHORITY_3 (zeroed = unused). Shared by both
-  // earn.initialize and staking.initialize.
-  const pauseAuthorities = resolveGuardians(deployer.publicKey);
 
   const earnProgramId = new PublicKey(art.programs.earn!.pubkey);
   const stakingProgramId = new PublicKey(art.programs.staking!.pubkey);
@@ -685,14 +615,11 @@ async function main(): Promise<void> {
   console.log(`pool_vault (earn-RWT):${poolVault.toBase58()} (owner=staking_config PDA, create-idempotent in-handler)`);
   console.log('--- init args ---');
   console.log(
-    `earn.initialize:      authority=${deployer.publicKey.toBase58()} ` +
-      `pause_authorities=[${guardianLabel(pauseAuthorities[0])}, ` +
-      `${guardianLabel(pauseAuthorities[1])}, ${guardianLabel(pauseAuthorities[2])}]`,
+    `earn.initialize:      authority=${deployer.publicKey.toBase58()}`,
   );
   console.log(
-    `staking.initialize:   pause_authorities=[${guardianLabel(pauseAuthorities[0])}, ` +
-      `${guardianLabel(pauseAuthorities[1])}, ${guardianLabel(pauseAuthorities[2])}] ` +
-      `reward_depositor=${deployer.publicKey.toBase58()} (authority=signer=deployer)`,
+    `staking.initialize:   reward_depositor=${deployer.publicKey.toBase58()} ` +
+      `(authority=signer=deployer)`,
   );
   console.log('=====================================================\n');
 
@@ -864,7 +791,7 @@ async function main(): Promise<void> {
         meta(daoFeeDestination, false, false),
         meta(SYSTEM_PROGRAM_ID, false, false),
       ];
-      const data = encodeEarnInitializeArgs(deployer.publicKey, pauseAuthorities);
+      const data = encodeEarnInitializeArgs(deployer.publicKey);
       const ix = new TransactionInstruction({ programId: earnProgramId, keys, data });
       const tx = new Transaction().add(...setupIxs, ix);
       await simulateOrSend(conn, tx, signers, execute, 'create basket_vault + earn.initialize');
@@ -890,7 +817,7 @@ async function main(): Promise<void> {
   //   6 system_program  readonly
   //   7 ata_program     readonly
   //
-  // Args: pause_authority_1/2/3, reward_depositor (authority comes from signer).
+  // Args: reward_depositor (authority comes from signer).
   // ========================================================================
   {
     if (stakingConfigExists) {
@@ -927,7 +854,7 @@ async function main(): Promise<void> {
         meta(SYSTEM_PROGRAM_ID, false, false),
         meta(ASSOCIATED_TOKEN_PROGRAM_ID, false, false),
       ];
-      const data = encodeStakingInitializeArgs(pauseAuthorities, deployer.publicKey);
+      const data = encodeStakingInitializeArgs(deployer.publicKey);
       const ix = new TransactionInstruction({ programId: stakingProgramId, keys, data });
       const tx = new Transaction().add(ix);
       if (!strwtMintKp) {

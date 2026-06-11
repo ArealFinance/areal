@@ -22,11 +22,9 @@ import {
 import { loadKeypairFile } from './keypair.js';
 import {
   buildEarnUpdateConfig,
-  buildEarnUnpause,
   buildEarnWritedown,
   buildEarnAuthorityAccept,
   buildStakingUpdateConfig,
-  buildStakingUnpause,
   buildStakingAuthorityAccept,
   buildBpfUpgrade,
   decodeInstruction,
@@ -296,36 +294,6 @@ propose
       opts.keypair,
       (vault) => [buildStakingUpdateConfig(cfg.programs.staking, vault, cfg.configPdas.stakingConfig, { rewardDepositor, minStake, cooldown })],
       'staking-update-config',
-    );
-  });
-
-propose
-  .command('earn-unpause')
-  .description('earn.unpause()')
-  .requiredOption('--keypair <path>', 'proposer keypair file')
-  .action(async (opts) => {
-    const { cfg, conn } = await withProposeContext();
-    await proposeAndReport(
-      cfg,
-      conn,
-      opts.keypair,
-      (vault) => [buildEarnUnpause(cfg.programs.earn, vault, cfg.configPdas.earnConfig)],
-      'earn-unpause',
-    );
-  });
-
-propose
-  .command('staking-unpause')
-  .description('staking.unpause()')
-  .requiredOption('--keypair <path>', 'proposer keypair file')
-  .action(async (opts) => {
-    const { cfg, conn } = await withProposeContext();
-    await proposeAndReport(
-      cfg,
-      conn,
-      opts.keypair,
-      (vault) => [buildStakingUnpause(cfg.programs.staking, vault, cfg.configPdas.stakingConfig)],
-      'staking-unpause',
     );
   });
 

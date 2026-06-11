@@ -2,7 +2,7 @@
  * Areal protocol instruction encoders + decoders.
  *
  * Ground truth: the Rust source at contracts/{earn,staking}/src/lib.rs and
- * instructions/*.rs (HEAD 232a27d, the 3-guardian redesign). We DO NOT depend on
+ * instructions/*.rs. We DO NOT depend on
  * the repo's sdk/ (stale IDLs, uncommitted WIP). Instructions are encoded
  * directly using the same scheme bootstrap-earn.ts uses.
  *
@@ -32,14 +32,12 @@ export function instructionDiscriminator(name: string): Buffer {
 /** Known instruction names we support, with their derived discriminators. */
 export const EARN_IX = {
   updateConfig: 'update_config',
-  unpause: 'unpause',
   writedownCapital: 'writedown_capital',
   acceptAuthorityTransfer: 'accept_authority_transfer',
 } as const;
 
 export const STAKING_IX = {
   updateConfig: 'update_config',
-  unpause: 'unpause',
   acceptAuthorityTransfer: 'accept_authority_transfer',
 } as const;
 
@@ -137,21 +135,6 @@ export function buildEarnUpdateConfig(
   return new TransactionInstruction({ programId: earnProgram, keys, data });
 }
 
-/**
- * earn.unpause(). Accounts (contracts/earn/src/instructions/pause.rs::UnpauseEarn):
- *   0 authority   signer  -> VAULT PDA
- *   1 earn_config mut
- */
-export function buildEarnUnpause(
-  earnProgram: PublicKey,
-  vault: PublicKey,
-  earnConfig: PublicKey,
-): TransactionInstruction {
-  const data = instructionDiscriminator(EARN_IX.unpause);
-  const keys: AccountMeta[] = [meta(vault, true, false), meta(earnConfig, false, true)];
-  return new TransactionInstruction({ programId: earnProgram, keys, data });
-}
-
 export interface EarnWritedownArgs {
   /** amount (u64). */
   amount: bigint;
@@ -233,21 +216,6 @@ export function buildStakingUpdateConfig(
     u64le(args.minStake),
     i64le(args.cooldown),
   ]);
-  const keys: AccountMeta[] = [meta(vault, true, false), meta(stakingConfig, false, true)];
-  return new TransactionInstruction({ programId: stakingProgram, keys, data });
-}
-
-/**
- * staking.unpause(). Accounts (contracts/staking/src/instructions/pause.rs::UnpauseStaking):
- *   0 authority      signer -> VAULT PDA
- *   1 staking_config mut
- */
-export function buildStakingUnpause(
-  stakingProgram: PublicKey,
-  vault: PublicKey,
-  stakingConfig: PublicKey,
-): TransactionInstruction {
-  const data = instructionDiscriminator(STAKING_IX.unpause);
   const keys: AccountMeta[] = [meta(vault, true, false), meta(stakingConfig, false, true)];
   return new TransactionInstruction({ programId: stakingProgram, keys, data });
 }
@@ -378,8 +346,8 @@ export interface KnownPrograms {
  * Full decode context: the known program ids PLUS the configured identities a
  * decoded instruction is checked against (vault PDA, config PDAs, optional
  * programData accounts). Threaded into `decodeInstruction` so it can verify that
- * a proposal labeled "earn-unpause" actually targets the REAL earn_config — not
- * a look-alike account a malicious proposer slipped in.
+ * a known proposal actually targets the REAL config PDA — not a look-alike
+ * account a malicious proposer slipped in.
  */
 export interface DecodeContext extends KnownPrograms {
   /** Squads vault PDA — the expected `authority` signer on every known ix. */
@@ -433,11 +401,9 @@ function labelAndVerifyAccounts(
 }
 
 const DISC_EARN_UPDATE = instructionDiscriminator(EARN_IX.updateConfig);
-const DISC_EARN_UNPAUSE = instructionDiscriminator(EARN_IX.unpause);
 const DISC_EARN_WRITEDOWN = instructionDiscriminator(EARN_IX.writedownCapital);
 const DISC_EARN_ACCEPT = instructionDiscriminator(EARN_IX.acceptAuthorityTransfer);
 const DISC_STAKING_UPDATE = instructionDiscriminator(STAKING_IX.updateConfig);
-const DISC_STAKING_UNPAUSE = instructionDiscriminator(STAKING_IX.unpause);
 const DISC_STAKING_ACCEPT = instructionDiscriminator(STAKING_IX.acceptAuthorityTransfer);
 
 function discEquals(data: Buffer, disc: Buffer): boolean {
@@ -527,24 +493,6 @@ export function decodeInstruction(
           warnings: [],
         };
       }
-      if (discEquals(data, DISC_EARN_UNPAUSE)) {
-        const { accounts, verified } = labelAndVerifyAccounts(
-          metas,
-          ['authority (vault)', 'earn_config'],
-          [ctx.vault, earnCfg],
-        );
-        return {
-          known: true,
-          verified,
-          program: label,
-          programId,
-          instructionName: 'unpause',
-          args: [],
-          accounts,
-          rawDataHex: hex,
-          warnings: [],
-        };
-      }
       if (discEquals(data, DISC_EARN_WRITEDOWN)) {
         const amount = readU64(data, 8);
         const reason = data.readUInt8(16);
@@ -623,24 +571,6 @@ export function decodeInstruction(
             { name: 'min_stake_amount', value: minStake.toString() },
             { name: 'cooldown_seconds', value: cooldown.toString() },
           ],
-          accounts,
-          rawDataHex: hex,
-          warnings: [],
-        };
-      }
-      if (discEquals(data, DISC_STAKING_UNPAUSE)) {
-        const { accounts, verified } = labelAndVerifyAccounts(
-          metas,
-          ['authority (vault)', 'staking_config'],
-          [ctx.vault, stakingCfg],
-        );
-        return {
-          known: true,
-          verified,
-          program: label,
-          programId,
-          instructionName: 'unpause',
-          args: [],
           accounts,
           rawDataHex: hex,
           warnings: [],

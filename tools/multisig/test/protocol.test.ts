@@ -8,11 +8,9 @@ import { PublicKey } from '@solana/web3.js';
 import {
   instructionDiscriminator,
   buildEarnUpdateConfig,
-  buildEarnUnpause,
   buildEarnWritedown,
   buildEarnAuthorityAccept,
   buildStakingUpdateConfig,
-  buildStakingUnpause,
   buildStakingAuthorityAccept,
   buildBpfUpgrade,
   decodeInstruction,
@@ -55,7 +53,6 @@ describe('instruction discriminators (Anchor/Arlex global: scheme)', () => {
     // name -> first 8 bytes hex (sha256("global:"+name)[0..8])
     ['initialize', 'afaf6d1f0d989bed'], // baseline from bootstrap-earn.ts
     ['update_config', '1d9efcbf0a53db63'],
-    ['unpause', 'a99004260a8dbcff'],
     ['writedown_capital', 'de0bbd7ca7464e8f'],
     ['accept_authority_transfer', 'eff8b102ce612eff'],
   ];
@@ -90,13 +87,6 @@ describe('earn encoders', () => {
     expect(ix.keys[1].pubkey.equals(EARN_CONFIG)).toBe(true);
     expect(ix.keys[1].isSigner).toBe(false);
     expect(ix.keys[1].isWritable).toBe(true);
-  });
-
-  it('unpause is disc-only with 2 accounts', () => {
-    const ix = buildEarnUnpause(EARN, VAULT, EARN_CONFIG);
-    expect(ix.data.length).toBe(8);
-    expect(hex(ix.data)).toBe('a99004260a8dbcff');
-    expect(ix.keys).toHaveLength(2);
   });
 
   it('writedown packs disc + u64 + u8 and includes rwt_mint readonly', () => {
@@ -146,11 +136,6 @@ describe('staking encoders', () => {
       cooldown: -1n,
     });
     expect(ix.data.readBigInt64LE(48)).toBe(-1n);
-  });
-
-  it('unpause is disc-only', () => {
-    const ix = buildStakingUnpause(STAKING, VAULT, STAKING_CONFIG);
-    expect(hex(ix.data)).toBe('a99004260a8dbcff');
   });
 
   it('authority-accept is disc-only', () => {
@@ -224,9 +209,13 @@ describe('decoder round-trips', () => {
     expect(d.accounts[2].name).toBe('rwt_mint');
   });
 
-  it('earn.unpause + earn.accept_authority_transfer', () => {
-    const u = buildEarnUnpause(EARN, VAULT, EARN_CONFIG);
-    expect(decodeInstruction(u.programId, u.keys, Buffer.from(u.data), known).instructionName).toBe('unpause');
+  it('old earn.unpause discriminator is unknown after pause removal', () => {
+    const d = decodeInstruction(EARN, [], instructionDiscriminator('unpause'), known);
+    expect(d.known).toBe(false);
+    expect(d.instructionName).toContain('UNKNOWN');
+  });
+
+  it('earn.accept_authority_transfer', () => {
     const a = buildEarnAuthorityAccept(EARN, VAULT, EARN_CONFIG);
     expect(decodeInstruction(a.programId, a.keys, Buffer.from(a.data), known).instructionName).toBe('accept_authority_transfer');
   });
@@ -309,7 +298,11 @@ describe('H1: account identity verification', () => {
   const REAL_FAKE = new PublicKey('5rrpFYYVkwGMeTTCox3EE4VBNvkYMCQmxkYJhS9TA4Wx');
 
   it('verified:true when authority and config match the configured PDAs', () => {
-    const ix = buildEarnUnpause(EARN, VAULT, EARN_CONFIG);
+    const ix = buildEarnUpdateConfig(EARN, VAULT, EARN_CONFIG, {
+      feeBps: 100,
+      minMint: 1_000_000n,
+      feeDestination: FEE_DEST,
+    });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.known).toBe(true);
     expect(d.verified).toBe(true);
@@ -317,8 +310,11 @@ describe('H1: account identity verification', () => {
   });
 
   it('verified:false + loud suffix when earn_config does NOT match configured', () => {
-    // Build a well-formed unpause but point earn_config at a look-alike account.
-    const ix = buildEarnUnpause(EARN, VAULT, REAL_FAKE);
+    const ix = buildEarnUpdateConfig(EARN, VAULT, REAL_FAKE, {
+      feeBps: 100,
+      minMint: 1_000_000n,
+      feeDestination: FEE_DEST,
+    });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.known).toBe(true); // still decodes the ix shape...
     expect(d.verified).toBe(false); // ...but the identity check failed
@@ -328,14 +324,22 @@ describe('H1: account identity verification', () => {
   });
 
   it('verified:false when the authority is not the configured vault', () => {
-    const ix = buildEarnUnpause(EARN, REAL_FAKE, EARN_CONFIG); // wrong authority
+    const ix = buildEarnUpdateConfig(EARN, REAL_FAKE, EARN_CONFIG, {
+      feeBps: 100,
+      minMint: 1_000_000n,
+      feeDestination: FEE_DEST,
+    });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.verified).toBe(false);
     expect(d.accounts[0].name).toContain('DOES NOT MATCH CONFIGURED');
   });
 
-  it('staking_config mismatch is flagged on staking.unpause', () => {
-    const ix = buildStakingUnpause(STAKING, VAULT, EARN_CONFIG); // earn cfg in staking slot
+  it('staking_config mismatch is flagged on staking.update_config', () => {
+    const ix = buildStakingUpdateConfig(STAKING, VAULT, EARN_CONFIG, {
+      rewardDepositor: REWARD_DEP,
+      minStake: 1_000_000n,
+      cooldown: 1_814_400n,
+    });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.verified).toBe(false);
     expect(d.accounts[1].name).toContain('DOES NOT MATCH CONFIGURED');

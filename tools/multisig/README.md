@@ -171,8 +171,6 @@ msig init [flags]                                  write msig.config.json
 
 msig propose earn-update-config   --keypair <p> --fee-bps <n> --min-mint <n> --fee-destination <pk>
 msig propose staking-update-config --keypair <p> --reward-depositor <pk> --min-stake <n> --cooldown <secs>
-msig propose earn-unpause         --keypair <p>
-msig propose staking-unpause      --keypair <p>
 msig propose earn-writedown       --keypair <p> --amount <n> --reason <code>
 msig propose earn-authority-accept    --keypair <p>
 msig propose staking-authority-accept --keypair <p>
@@ -199,11 +197,9 @@ Notes:
 | Command | On-chain instruction | Args | Accounts (vault = `authority`) |
 |---|---|---|---|
 | `earn-update-config` | `earn.update_config` | `mint_fee_bps:u16, min_mint_amount:u64, dao_fee_destination:[u8;32]` | `authority(signer)`, `earn_config(w)` |
-| `earn-unpause` | `earn.unpause` | — | `authority(signer)`, `earn_config(w)` |
 | `earn-writedown` | `earn.writedown_capital` | `amount:u64, reason_code:u8` | `authority(signer)`, `earn_config(w)`, `rwt_mint(r)` |
 | `earn-authority-accept` | `earn.accept_authority_transfer` | — | `new_authority(signer)`, `earn_config(w)` |
 | `staking-update-config` | `staking.update_config` | `reward_depositor:[u8;32], min_stake_amount:u64, cooldown_seconds:i64` | `authority(signer)`, `staking_config(w)` |
-| `staking-unpause` | `staking.unpause` | — | `authority(signer)`, `staking_config(w)` |
 | `staking-authority-accept` | `staking.accept_authority_transfer` | — | `new_authority(signer)`, `staking_config(w)` |
 | `upgrade` | BPF Upgradeable Loader `Upgrade` | — (u32 `3`) | `programdata(w)`, `program(w)`, `buffer(w)`, `spill(w)`, `rent`, `clock`, `authority(signer)` |
 
@@ -293,7 +289,6 @@ the `initialize` value already baked into `scripts/lib/bootstrap-earn.ts`
 | instruction | discriminator (hex) |
 |---|---|
 | `update_config` | `1d 9e fc bf 0a 53 db 63` |
-| `unpause` | `a9 90 04 26 0a 8d bc ff` |
 | `writedown_capital` | `de 0b bd 7c a7 46 4e 8f` |
 | `accept_authority_transfer` | `ef f8 b1 02 ce 61 2e ff` |
 | (`initialize`, baseline) | `af af 6d 1f 0d 98 9b ed` |
