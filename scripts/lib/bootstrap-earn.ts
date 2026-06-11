@@ -22,6 +22,12 @@
  *      staking.initialize via the Associated Token Program CPI.
  *   5. earn.initialize(authority=deployer) — basket_vault is NOT an account
  *      here anymore; config.basket_vault is left zeroed by the handler.
+ *   5b. (optional) earn.seed_genesis(amount) — ONE-TIME founder genesis mint of
+ *      earn-RWT against an off-chain RWA. Mints `amount` earn-RWT to a treasury
+ *      ATA and sets total_invested_capital = amount (NAV $1.00); no USDC. Opt-in
+ *      via EARN_GENESIS_RWT (base units, 6dp); skipped when unset/0 or when the
+ *      earn-RWT supply is already non-zero (genesis already done). Recipient
+ *      wallet = EARN_GENESIS_RECIPIENT, defaulting to the deployer.
  *   6. earn.update_config(...) to SET basket_vault to the external treasury
  *      USDC account (mint_rwt / add_to_basket revert BasketVaultNotSet until
  *      this runs). dao_fee_destination MUST differ from basket_vault.
@@ -57,6 +63,12 @@
  * Usage (from repo root):
  *   npx tsx scripts/lib/bootstrap-earn.ts [--dry-run]      # default, no send
  *   npx tsx scripts/lib/bootstrap-earn.ts --execute        # actually sends
+ *
+ * Genesis seed (optional, opt-in):
+ *   EARN_GENESIS_RWT=25000000000 npx tsx scripts/lib/bootstrap-earn.ts --execute
+ *     # mints 25,000 earn-RWT (6dp) at genesis to the deployer's earn-RWT ATA.
+ *   EARN_GENESIS_RECIPIENT=<wallet> overrides the recipient (default: deployer).
+ *   Unset/0 EARN_GENESIS_RWT ⇒ the seed_genesis step is skipped.
  */
 
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
@@ -121,6 +133,13 @@ const STAKING_INITIALIZE_DISCRIMINATOR = Buffer.from([
 const EARN_UPDATE_CONFIG_DISCRIMINATOR = Buffer.from([
   0x1d, 0x9e, 0xfc, 0xbf, 0x0a, 0x53, 0xdb, 0x63,
 ]);
+// earn.seed_genesis (from sdk/src/programs/earn/instructions.generated.ts
+// SEED_GENESIS_DISCRIMINATOR == sha256("global:seed_genesis")[0..8]). One-time
+// founder genesis mint: records an off-chain RWA's value as the initial
+// total_invested_capital and mints the matching earn-RWT at NAV $1.00 (no USDC).
+const EARN_SEED_GENESIS_DISCRIMINATOR = Buffer.from([
+  0xb8, 0x20, 0x6c, 0x56, 0x9a, 0x4e, 0xbc, 0xa0,
+]);
 
 // earn.update_config arg defaults (contracts/earn/src/constants.rs). initialize
 // seeds the config with these, so re-affirming them in update_config is a no-op
@@ -141,6 +160,9 @@ const STAKING_CONFIG_DISCRIMINATOR = Buffer.from([
 //   supply: bytes [36..44)
 const MINT_AUTHORITY_TAG_OFFSET = 0;
 const MINT_AUTHORITY_OFFSET = 4;
+// Mint supply (u64 LE) starts right after the 36-byte COption<authority> prefix.
+// Used by seed_genesis idempotency: a non-zero supply means genesis already ran.
+const MINT_SUPPLY_OFFSET = 36;
 
 // EarnConfig layout offsets including the 8-byte Arlex account discriminator.
 // See contracts/earn/src/state.rs (data running offsets:
@@ -202,6 +224,13 @@ interface EarnSection {
   pool_vault?: string;
   earn_config_pda?: string;
   staking_config_pda?: string;
+  // Genesis seed (earn.seed_genesis) — recorded for audit. Only present when a
+  // genesis was requested (EARN_GENESIS_RWT > 0). The mint lands at NAV $1.00:
+  // total_invested_capital == genesis_rwt_amount, no USDC deposited.
+  genesis_recipient_ata?: string;
+  genesis_recipient_owner?: string;
+  genesis_rwt_amount?: string;
+  genesis_nav_note?: string;
   bootstrapped_at?: string;
   // Secret material: the earn-RWT + stRWT mint keypair bytes (base64). Needed
   // for warm restarts so re-runs reuse the same mints instead of generating
@@ -304,6 +333,13 @@ function encodeEarnUpdateConfigArgs(
     Buffer.from(daoFeeDestination.toBytes()),
     Buffer.from(basketVault.toBytes()),
   ]);
+}
+
+// earn.seed_genesis(amount: u64). Borsh wire order: a single u64 (LE).
+function encodeEarnSeedGenesisArgs(amount: bigint): Buffer {
+  const amountBuf = Buffer.alloc(8);
+  amountBuf.writeBigUInt64LE(amount, 0);
+  return Buffer.concat([EARN_SEED_GENESIS_DISCRIMINATOR, amountBuf]);
 }
 
 const meta = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): AccountMeta => ({
@@ -419,6 +455,18 @@ async function readMintAuthority(conn: Connection, mint: PublicKey): Promise<Pub
   return new PublicKey(info.data.subarray(MINT_AUTHORITY_OFFSET, MINT_AUTHORITY_OFFSET + 32));
 }
 
+/**
+ * Returns the current SPL mint supply (u64), or null if the mint does not yet
+ * exist. seed_genesis is a ONE-TIME op gated on supply == 0 on-chain; we read
+ * the supply here to skip the step cleanly when genesis already happened
+ * (instead of relying on the contract's GenesisAlreadyComplete = 6027 revert).
+ */
+async function readMintSupply(conn: Connection, mint: PublicKey): Promise<bigint | null> {
+  const info = await conn.getAccountInfo(mint, 'confirmed');
+  if (!info || info.data.length < MINT_SIZE) return null;
+  return info.data.readBigUInt64LE(MINT_SUPPLY_OFFSET);
+}
+
 // --------------------------------------------------------------------------
 // tx send / simulate
 // --------------------------------------------------------------------------
@@ -482,6 +530,14 @@ interface Cli {
   // Treasury wallet whose USDC ATA becomes the basket_vault. Set via the
   // EARN_TREASURY env var. Lower precedence than EARN_BASKET_VAULT.
   treasuryOwnerOverride: PublicKey | null;
+  // One-time founder genesis seed (earn.seed_genesis). Amount of earn-RWT to
+  // mint at genesis, in base units (6dp): e.g. 25_000_000_000 = 25k RWT @ $1.00.
+  // Set via EARN_GENESIS_RWT. 0n (unset/zero) ⇒ the seed_genesis step is SKIPPED.
+  genesisAmount: bigint;
+  // Wallet that receives the genesis mint; its earn-RWT ATA is the recipient and
+  // is created idempotently. Set via EARN_GENESIS_RECIPIENT; defaults to the
+  // deployer when unset.
+  genesisRecipientOwner: PublicKey | null;
 }
 
 function parseArgs(argv: string[]): Cli {
@@ -506,13 +562,41 @@ function parseArgs(argv: string[]): Cli {
     ? new PublicKey(process.env.EARN_TREASURY)
     : null;
 
-  return { execute, basketVaultOverride, treasuryOwnerOverride };
+  // Genesis seed is sourced from the environment, opt-in:
+  //   EARN_GENESIS_RWT       — amount in base units (6dp). Unset/0 ⇒ skip the step.
+  //   EARN_GENESIS_RECIPIENT — wallet that receives the mint (its earn-RWT ATA).
+  //                            Defaults to the deployer when unset.
+  let genesisAmount = 0n;
+  if (process.env.EARN_GENESIS_RWT) {
+    const raw = process.env.EARN_GENESIS_RWT.trim();
+    if (!/^\d+$/.test(raw)) {
+      throw new Error(
+        `EARN_GENESIS_RWT must be a non-negative integer in base units (6dp), got "${raw}"`,
+      );
+    }
+    genesisAmount = BigInt(raw);
+  }
+  const genesisRecipientOwner = process.env.EARN_GENESIS_RECIPIENT
+    ? new PublicKey(process.env.EARN_GENESIS_RECIPIENT)
+    : null;
+
+  return {
+    execute,
+    basketVaultOverride,
+    treasuryOwnerOverride,
+    genesisAmount,
+    genesisRecipientOwner,
+  };
 }
 
 async function main(): Promise<void> {
-  const { execute, basketVaultOverride, treasuryOwnerOverride } = parseArgs(
-    process.argv.slice(2),
-  );
+  const {
+    execute,
+    basketVaultOverride,
+    treasuryOwnerOverride,
+    genesisAmount,
+    genesisRecipientOwner,
+  } = parseArgs(process.argv.slice(2));
 
   const art = loadAddresses();
   if (art.cluster !== 'devnet' || !art.rpc.http.includes('devnet')) {
@@ -713,6 +797,14 @@ async function main(): Promise<void> {
     );
   }
 
+  // --- genesis seed recipient (earn.seed_genesis) --------------------------
+  // The genesis mint lands in the treasury wallet's earn-RWT ATA. The treasury
+  // wallet defaults to the deployer (EARN_GENESIS_RECIPIENT overrides it). The
+  // ATA is an on-curve wallet ATA, so allowOwnerOffCurve = false.
+  const genesisEnabled = genesisAmount > 0n;
+  const genesisRecipientWallet = genesisRecipientOwner ?? deployer.publicKey;
+  const genesisRecipientAta = findAta(genesisRecipientWallet, earnRwtMint, false);
+
   // --- Plan print ----------------------------------------------------------
   console.log('\n================ bootstrap-earn PLAN ================');
   console.log(`mode:                 ${execute ? 'EXECUTE (will send)' : 'DRY-RUN (simulate only)'}`);
@@ -745,6 +837,18 @@ async function main(): Promise<void> {
     `staking.initialize:   reward_depositor=${deployer.publicKey.toBase58()} ` +
       `(authority=signer=deployer)`,
   );
+  if (genesisEnabled) {
+    console.log(
+      `earn.seed_genesis:    amount=${genesisAmount.toString()} base units ` +
+        `(${(Number(genesisAmount) / 10 ** EARN_RWT_DECIMALS).toLocaleString()} RWT @ NAV $1.00)`,
+    );
+    console.log(
+      `  genesis recipient:  ${genesisRecipientAta.toBase58()} ` +
+        `(earn-RWT ATA of ${genesisRecipientWallet.toBase58()}${genesisRecipientOwner ? ', EARN_GENESIS_RECIPIENT' : ', deployer default'})`,
+    );
+  } else {
+    console.log('earn.seed_genesis:    SKIPPED (EARN_GENESIS_RWT unset or 0)');
+  }
   console.log('=====================================================\n');
 
   // ========================================================================
@@ -881,6 +985,83 @@ async function main(): Promise<void> {
       const ix = new TransactionInstruction({ programId: earnProgramId, keys, data });
       const tx = new Transaction().add(ix);
       await simulateOrSend(conn, tx, [deployer], execute, 'earn.initialize');
+    }
+  }
+
+  // ========================================================================
+  // Step 5b: earn.seed_genesis — ONE-TIME founder genesis mint.
+  // Placed right after earn.initialize: it only needs the EarnConfig PDA and the
+  // earn-RWT mint (both live by now); it does NOT need basket_vault (no USDC is
+  // moved). Records an off-chain RWA's value as the initial
+  // total_invested_capital and mints the matching earn-RWT at NAV $1.00.
+  //
+  // Opt-in + idempotent:
+  //   - SKIP entirely when EARN_GENESIS_RWT is unset/0 (devnet may not want a
+  //     genesis seed).
+  //   - SKIP cleanly when the earn-RWT mint supply is already != 0 (genesis
+  //     already done). The contract would also reject with
+  //     GenesisAlreadyComplete = 6027, but skipping avoids a guaranteed revert.
+  //   - The recipient earn-RWT ATA is created idempotently in the SAME tx.
+  //
+  // Account order (1:1 with contracts/earn/src/instructions/seed_genesis.rs):
+  //   0 bootstrap_authority signer            (= deployer; must == on-chain
+  //                                             BOOTSTRAP_AUTHORITY pin)
+  //   1 earn_config          writable
+  //   2 rwt_mint             writable          (= earn-RWT mint; supply must be 0)
+  //   3 recipient_rwt        writable          (treasury earn-RWT ATA)
+  //   4 token_program        readonly
+  // Args: amount (u64).
+  // ========================================================================
+  {
+    if (!genesisEnabled) {
+      log('earn-seed-genesis', 'skip (EARN_GENESIS_RWT unset or 0 — no genesis seed requested)');
+    } else if (!execute && !earnConfigExists) {
+      // Dry-run limitation: EarnConfig + earn-RWT mint exist only in prior
+      // un-sent txs, so a standalone simulation would fail. Defer (same pattern
+      // as earn.update_config / staking.initialize above).
+      log(
+        'earn-seed-genesis',
+        'DEFERRED in dry-run — depends on EarnConfig + earn-RWT mint created by ' +
+          'prior un-sent txs (would simulate cleanly once committed under --execute)',
+      );
+    } else {
+      // Idempotency: a non-zero earn-RWT supply means genesis already ran.
+      const currentSupply = await readMintSupply(conn, earnRwtMint);
+      if (currentSupply !== null && currentSupply !== 0n) {
+        log(
+          'earn-seed-genesis',
+          `skip (earn-RWT supply already ${currentSupply.toString()} != 0 — genesis already complete)`,
+        );
+      } else {
+        // Build: create the recipient earn-RWT ATA idempotently, then seed_genesis.
+        const setupIxs: TransactionInstruction[] = [];
+        if (!(await accountExists(conn, genesisRecipientAta))) {
+          setupIxs.push(
+            createAssociatedTokenAccountIdempotentInstruction(
+              deployer.publicKey, // payer
+              genesisRecipientAta,
+              genesisRecipientWallet, // owner of the treasury ATA
+              earnRwtMint,
+              TOKEN_PROGRAM_ID,
+              ASSOCIATED_TOKEN_PROGRAM_ID,
+            ),
+          );
+        } else {
+          log('earn-genesis-ata', 'skip create (recipient earn-RWT ATA exists)');
+        }
+
+        const keys: AccountMeta[] = [
+          meta(deployer.publicKey, true, false), // bootstrap_authority (signer)
+          meta(earnConfigPda, false, true),
+          meta(earnRwtMint, false, true),
+          meta(genesisRecipientAta, false, true),
+          meta(TOKEN_PROGRAM_ID, false, false),
+        ];
+        const data = encodeEarnSeedGenesisArgs(genesisAmount);
+        const ix = new TransactionInstruction({ programId: earnProgramId, keys, data });
+        const tx = new Transaction().add(...setupIxs, ix);
+        await simulateOrSend(conn, tx, [deployer], execute, 'earn.seed_genesis');
+      }
     }
   }
 
@@ -1071,6 +1252,21 @@ async function main(): Promise<void> {
   earnSection.pool_vault = poolVault.toBase58();
   earnSection.earn_config_pda = earnConfigPda.toBase58();
   earnSection.staking_config_pda = stakingConfigPda.toBase58();
+  // Genesis seed audit trail. Only journal when a genesis was requested; clear
+  // any stale fields otherwise so the section stays truthful across re-runs.
+  if (genesisEnabled) {
+    earnSection.genesis_recipient_ata = genesisRecipientAta.toBase58();
+    earnSection.genesis_recipient_owner = genesisRecipientWallet.toBase58();
+    earnSection.genesis_rwt_amount = genesisAmount.toString();
+    earnSection.genesis_nav_note =
+      `total_invested_capital set to ${genesisAmount.toString()} (6dp); NAV $1.00 ` +
+      `(INITIAL_NAV) at genesis — earn-RWT and USDC share 6dp scale, capital == supply 1:1`;
+  } else {
+    delete earnSection.genesis_recipient_ata;
+    delete earnSection.genesis_recipient_owner;
+    delete earnSection.genesis_rwt_amount;
+    delete earnSection.genesis_nav_note;
+  }
   if (earnRwtMintKp) {
     earnSection.earn_rwt_mint_keypair_b64 = keypairToB64(earnRwtMintKp);
   } else {
@@ -1105,6 +1301,9 @@ async function main(): Promise<void> {
       pool_vault: earnSection.pool_vault,
       earn_config_pda: earnSection.earn_config_pda,
       staking_config_pda: earnSection.staking_config_pda,
+      genesis_recipient_ata: earnSection.genesis_recipient_ata ?? null,
+      genesis_recipient_owner: earnSection.genesis_recipient_owner ?? null,
+      genesis_rwt_amount: earnSection.genesis_rwt_amount ?? null,
     });
   }
 
