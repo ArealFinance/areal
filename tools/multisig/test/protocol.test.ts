@@ -28,6 +28,7 @@ const EARN_CONFIG = new PublicKey('H4DBeFKwZsVrhMmMFG7HSMEQckeCYdewuri28kQ3wT4p'
 const STAKING_CONFIG = new PublicKey('BWb75dNXbJbteLsmKy58sfHj8nYVa6CqaDzJrWo1mP1R');
 const RWT_MINT = new PublicKey('8hJPUC4UNsiyBh5cosTA8RqY9TbBSmnxqkBb2sHJ5qzM');
 const FEE_DEST = new PublicKey('DYw8jCTfwHNRJhhmFcbXvVDTqWMEVFBX6ZKUmG5CNSKK');
+const BASKET_VAULT = new PublicKey('Ew8GFA29zsUXzf8dmDmesbHVCSfXVAVnPWYtr9nF3sqo');
 const REWARD_DEP = new PublicKey('5rrpFYYVkwGMeTTCox3EE4VBNvkYMCQmxkYJhS9TA4Wx');
 
 // Full decode context: program ids + the configured identities the decoder
@@ -67,18 +68,21 @@ describe('instruction discriminators (Anchor/Arlex global: scheme)', () => {
 // EARN encoders — byte-exact.
 // ---------------------------------------------------------------------------
 describe('earn encoders', () => {
-  it('update_config packs disc + u16 + u64 + pubkey, correct account roles', () => {
+  it('update_config packs disc + u16 + u64 + pubkey + pubkey, correct account roles', () => {
     const ix = buildEarnUpdateConfig(EARN, VAULT, EARN_CONFIG, {
       feeBps: 100,
       minMint: 1_000_000n,
       feeDestination: FEE_DEST,
+      basketVault: BASKET_VAULT,
     });
-    // data = 8 (disc) + 2 (u16) + 8 (u64) + 32 (pubkey) = 50 bytes
-    expect(ix.data.length).toBe(50);
+    // data = 8 (disc) + 2 (u16) + 8 (u64) + 32 (dao_fee) + 32 (basket_vault) = 82 bytes
+    expect(ix.data.length).toBe(82);
     expect(hex(ix.data.subarray(0, 8))).toBe('1d9efcbf0a53db63');
     expect(ix.data.readUInt16LE(8)).toBe(100);
     expect(ix.data.readBigUInt64LE(10)).toBe(1_000_000n);
     expect(new PublicKey(ix.data.subarray(18, 50)).equals(FEE_DEST)).toBe(true);
+    // basket_vault appended last, offset 50.
+    expect(new PublicKey(ix.data.subarray(50, 82)).equals(BASKET_VAULT)).toBe(true);
     expect(ix.programId.equals(EARN)).toBe(true);
     // account 0 = authority (vault), signer, readonly; account 1 = earn_config, writable
     expect(ix.keys[0].pubkey.equals(VAULT)).toBe(true);
@@ -184,6 +188,7 @@ describe('decoder round-trips', () => {
       feeBps: 250,
       minMint: 2_000_000n,
       feeDestination: FEE_DEST,
+      basketVault: BASKET_VAULT,
     });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.known).toBe(true);
@@ -192,6 +197,7 @@ describe('decoder round-trips', () => {
     expect(d.args.find((a) => a.name === 'mint_fee_bps')?.value).toContain('250');
     expect(d.args.find((a) => a.name === 'min_mint_amount')?.value).toBe('2000000');
     expect(d.args.find((a) => a.name === 'dao_fee_destination')?.value).toBe(FEE_DEST.toBase58());
+    expect(d.args.find((a) => a.name === 'basket_vault')?.value).toBe(BASKET_VAULT.toBase58());
     expect(d.accounts[0].name).toContain('vault');
     expect(d.accounts[0].isSigner).toBe(true);
   });
@@ -302,6 +308,7 @@ describe('H1: account identity verification', () => {
       feeBps: 100,
       minMint: 1_000_000n,
       feeDestination: FEE_DEST,
+      basketVault: BASKET_VAULT,
     });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.known).toBe(true);
@@ -314,6 +321,7 @@ describe('H1: account identity verification', () => {
       feeBps: 100,
       minMint: 1_000_000n,
       feeDestination: FEE_DEST,
+      basketVault: BASKET_VAULT,
     });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.known).toBe(true); // still decodes the ix shape...
@@ -328,6 +336,7 @@ describe('H1: account identity verification', () => {
       feeBps: 100,
       minMint: 1_000_000n,
       feeDestination: FEE_DEST,
+      basketVault: BASKET_VAULT,
     });
     const d = decodeInstruction(ix.programId, ix.keys, Buffer.from(ix.data), known);
     expect(d.verified).toBe(false);

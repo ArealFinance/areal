@@ -14,22 +14,33 @@
  *   3. (staking) stRWT mint is NOT pre-created here — staking.initialize
  *      creates it in-handler (CreateAccount + InitializeMint2). We only
  *      generate a fresh signer keypair for it and co-sign the init tx.
- *   4. Prepare earn's token accounts: dao_fee_destination is an ATA owned by
- *      deployer; basket_vault is a fresh signer token account owned by
- *      EarnConfig PDA and created in the same tx as earn.initialize. The
- *      staking pool_vault is created or accepted by staking.initialize via
- *      the Associated Token Program CPI.
- *   5. earn.initialize(authority=deployer).
- *   6. staking.initialize(reward_depositor=deployer) — authority is taken
+ *   4. Prepare earn's token accounts: dao_fee_destination is a USDC ATA owned
+ *      by deployer. basket_vault is now an EXTERNAL USDC treasury token account
+ *      (NOT owned by the EarnConfig PDA — the program no longer custodies USDC)
+ *      and is no longer passed to earn.initialize; it is set AFTER init via
+ *      earn.update_config. The staking pool_vault is created or accepted by
+ *      staking.initialize via the Associated Token Program CPI.
+ *   5. earn.initialize(authority=deployer) — basket_vault is NOT an account
+ *      here anymore; config.basket_vault is left zeroed by the handler.
+ *   6. earn.update_config(...) to SET basket_vault to the external treasury
+ *      USDC account (mint_rwt / add_to_basket revert BasketVaultNotSet until
+ *      this runs). dao_fee_destination MUST differ from basket_vault.
+ *   7. staking.initialize(reward_depositor=deployer) — authority is taken
  *      from the signer, NOT an arg.
- *   7. Journal everything into data/devnet-addresses.json under an `earn`
+ *   8. Journal everything into data/devnet-addresses.json under an `earn`
  *      section (atomic tmp + rename).
  *
  * Account-creation model — VERIFIED against the contract structs:
  *   - contracts/earn/src/instructions/initialize.rs: EXPECTS pre-created
- *     rwt_mint (authority already = EarnConfig PDA), basket_vault and
- *     dao_fee_destination (both USDC token accounts). The handler only writes
- *     EarnConfig; it does NOT create any token account or mint.
+ *     rwt_mint (authority already = EarnConfig PDA) and dao_fee_destination (a
+ *     USDC token account). basket_vault is NO LONGER an initialize account —
+ *     the handler leaves config.basket_vault zeroed and it is set later via
+ *     update_config. The handler only writes EarnConfig; it does NOT create any
+ *     token account or mint.
+ *   - contracts/earn/src/instructions/update_config.rs: sets the external
+ *     basket_vault (and re-affirms mint_fee_bps / min_mint_amount /
+ *     dao_fee_destination). Rejects a zero basket_vault (ZeroBasketVault) and a
+ *     basket_vault equal to dao_fee_destination (FeeDestinationIsBasketVault).
  *   - contracts/staking/src/instructions/initialize.rs: CREATES the strwt_mint
  *     (System CreateAccount + Token InitializeMint2, authority = StakingConfig
  *     PDA) and the pool_vault (Associated Token Program Create, RWT ATA owned
@@ -105,6 +116,17 @@ const EARN_INITIALIZE_DISCRIMINATOR = Buffer.from([
 const STAKING_INITIALIZE_DISCRIMINATOR = Buffer.from([
   0xaf, 0xaf, 0x6d, 0x1f, 0x0d, 0x98, 0x9b, 0xed,
 ]);
+// earn.update_config (from sdk/src/programs/earn/instructions.generated.ts
+// UPDATE_CONFIG_DISCRIMINATOR). Used to SET the external basket_vault after init.
+const EARN_UPDATE_CONFIG_DISCRIMINATOR = Buffer.from([
+  0x1d, 0x9e, 0xfc, 0xbf, 0x0a, 0x53, 0xdb, 0x63,
+]);
+
+// earn.update_config arg defaults (contracts/earn/src/constants.rs). initialize
+// seeds the config with these, so re-affirming them in update_config is a no-op
+// that only changes basket_vault. Bounds are also enforced on-chain.
+const EARN_DEFAULT_MINT_FEE_BPS = 100; // 1% — DEFAULT_MINT_FEE_BPS
+const EARN_DEFAULT_MIN_MINT_AMOUNT = 1_000_000n; // $1.00 — MIN_MINT_AMOUNT
 
 // Account discriminators (from sdk/src/programs/*/accounts.generated.ts).
 const EARN_CONFIG_DISCRIMINATOR = Buffer.from([
@@ -124,10 +146,12 @@ const MINT_AUTHORITY_OFFSET = 4;
 // See contracts/earn/src/state.rs (data running offsets:
 // 16,48,80,81,83,115,147,179,211,219,220).
 const EARN_CONFIG_ACCOUNT_LENGTH = 228;
+const EARN_CONFIG_MINT_FEE_BPS_OFFSET = 8 + 81;
 const EARN_CONFIG_BASKET_VAULT_OFFSET = 8 + 83;
 const EARN_CONFIG_DAO_FEE_DESTINATION_OFFSET = 8 + 115;
 const EARN_CONFIG_RWT_MINT_OFFSET = 8 + 147;
 const EARN_CONFIG_USDC_MINT_OFFSET = 8 + 179;
+const EARN_CONFIG_MIN_MINT_AMOUNT_OFFSET = 8 + 211;
 
 // StakingConfig layout offsets including the 8-byte Arlex discriminator.
 // See contracts/staking/src/state.rs (data running offsets:
@@ -168,7 +192,12 @@ interface DevnetAddresses {
 interface EarnSection {
   earn_rwt_mint?: string;
   strwt_mint?: string;
+  // basket_vault is now an EXTERNAL USDC treasury token account (NOT owned by
+  // the EarnConfig PDA) set via update_config after init.
   basket_vault?: string;
+  // Owner of the external basket_vault treasury account (deployer by default,
+  // or the EARN_TREASURY wallet). Recorded for audit; not used on-chain.
+  basket_vault_owner?: string;
   dao_fee_destination?: string;
   pool_vault?: string;
   earn_config_pda?: string;
@@ -180,6 +209,12 @@ interface EarnSection {
   // staking.initialize failed mid-way.)
   earn_rwt_mint_keypair_b64?: string;
   strwt_mint_keypair_b64?: string;
+  // Secret material: the default (deployer-owned) basket_vault treasury token
+  // account keypair (base64). Only present when the treasury is a fresh
+  // script-generated token account (no EARN_BASKET_VAULT / EARN_TREASURY env).
+  // Lets warm restarts reuse the same treasury account instead of generating a
+  // fresh one. When an external treasury is configured via env, this is absent.
+  basket_vault_keypair_b64?: string;
 }
 
 function loadAddresses(): DevnetAddresses {
@@ -249,6 +284,28 @@ function encodeStakingInitializeArgs(rewardDepositor: PublicKey): Buffer {
   ]);
 }
 
+// earn.update_config(mint_fee_bps: u16, min_mint_amount: u64,
+//                    dao_fee_destination: [u8;32], basket_vault: [u8;32])
+// Borsh wire order: u16 (LE), u64 (LE), then two 32-byte arrays.
+function encodeEarnUpdateConfigArgs(
+  mintFeeBps: number,
+  minMintAmount: bigint,
+  daoFeeDestination: PublicKey,
+  basketVault: PublicKey,
+): Buffer {
+  const feeBuf = Buffer.alloc(2);
+  feeBuf.writeUInt16LE(mintFeeBps, 0);
+  const minBuf = Buffer.alloc(8);
+  minBuf.writeBigUInt64LE(minMintAmount, 0);
+  return Buffer.concat([
+    EARN_UPDATE_CONFIG_DISCRIMINATOR,
+    feeBuf,
+    minBuf,
+    Buffer.from(daoFeeDestination.toBytes()),
+    Buffer.from(basketVault.toBytes()),
+  ]);
+}
+
 const meta = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): AccountMeta => ({
   pubkey,
   isSigner,
@@ -264,21 +321,13 @@ async function accountExists(conn: Connection, addr: PublicKey): Promise<boolean
   return info !== null;
 }
 
-async function readTokenAccountAmount(conn: Connection, addr: PublicKey): Promise<bigint | null> {
-  const balance = await conn.getTokenAccountBalance(addr, 'confirmed').catch((e: unknown) => {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('could not find account')) return null;
-    throw e;
-  });
-  if (!balance) return null;
-  return BigInt(balance.value.amount);
-}
-
 interface OnchainEarnConfig {
+  mintFeeBps: number;
   basketVault: PublicKey;
   daoFeeDestination: PublicKey;
   rwtMint: PublicKey;
   usdcMint: PublicKey;
+  minMintAmount: bigint;
 }
 
 interface OnchainStakingConfig {
@@ -333,11 +382,18 @@ function readEarnConfig(data: Buffer, addr: PublicKey): OnchainEarnConfig {
     );
   }
   return {
+    mintFeeBps: data.readUInt16LE(EARN_CONFIG_MINT_FEE_BPS_OFFSET),
     basketVault: readPubkeyAt(data, EARN_CONFIG_BASKET_VAULT_OFFSET),
     daoFeeDestination: readPubkeyAt(data, EARN_CONFIG_DAO_FEE_DESTINATION_OFFSET),
     rwtMint: readPubkeyAt(data, EARN_CONFIG_RWT_MINT_OFFSET),
     usdcMint: readPubkeyAt(data, EARN_CONFIG_USDC_MINT_OFFSET),
+    minMintAmount: data.readBigUInt64LE(EARN_CONFIG_MIN_MINT_AMOUNT_OFFSET),
   };
+}
+
+/** True when the on-chain basket_vault is the all-zero (unset) address. */
+function isZeroPubkey(pk: PublicKey): boolean {
+  return pk.equals(PublicKey.default);
 }
 
 function readStakingConfig(data: Buffer, addr: PublicKey): OnchainStakingConfig {
@@ -420,6 +476,12 @@ async function simulateOrSend(
 
 interface Cli {
   execute: boolean;
+  // Explicit external basket_vault USDC token-account address (highest
+  // precedence). Set via the EARN_BASKET_VAULT env var. Used as-is.
+  basketVaultOverride: PublicKey | null;
+  // Treasury wallet whose USDC ATA becomes the basket_vault. Set via the
+  // EARN_TREASURY env var. Lower precedence than EARN_BASKET_VAULT.
+  treasuryOwnerOverride: PublicKey | null;
 }
 
 function parseArgs(argv: string[]): Cli {
@@ -431,11 +493,26 @@ function parseArgs(argv: string[]): Cli {
       throw new Error(`unknown flag: ${a} (valid: --dry-run | --execute)`);
     }
   }
-  return { execute };
+
+  // basket_vault treasury is sourced from the environment, not flags:
+  //   EARN_BASKET_VAULT — explicit USDC token-account pubkey (used verbatim).
+  //   EARN_TREASURY     — a wallet pubkey; basket_vault = its USDC ATA.
+  // If neither is set, the script creates a fresh deployer-owned USDC token
+  // account (external to the EarnConfig PDA) and journals it for reuse.
+  const basketVaultOverride = process.env.EARN_BASKET_VAULT
+    ? new PublicKey(process.env.EARN_BASKET_VAULT)
+    : null;
+  const treasuryOwnerOverride = process.env.EARN_TREASURY
+    ? new PublicKey(process.env.EARN_TREASURY)
+    : null;
+
+  return { execute, basketVaultOverride, treasuryOwnerOverride };
 }
 
 async function main(): Promise<void> {
-  const { execute } = parseArgs(process.argv.slice(2));
+  const { execute, basketVaultOverride, treasuryOwnerOverride } = parseArgs(
+    process.argv.slice(2),
+  );
 
   const art = loadAddresses();
   if (art.cluster !== 'devnet' || !art.rpc.http.includes('devnet')) {
@@ -555,31 +632,72 @@ async function main(): Promise<void> {
     strwtMint = strwtMintKp.publicKey;
   }
 
-  // --- Derived token accounts ---------------------------------------------
-  // basket_vault: fresh USDC token account owned by EarnConfig PDA. Using a
-  // non-ATA signer account keeps the address private until the initialize tx
-  // is submitted, which avoids deterministic-ATA dusting before bootstrap.
-  let basketVaultKp: Keypair | null = null;
+  // dao_fee_destination: USDC ATA owned by deployer until EarnConfig exists;
+  // after init, read the actual value from on-chain config because it is
+  // tunable via update_config. (Derived before basket_vault because the
+  // default fresh-treasury branch must guarantee basket_vault != dao_fee.)
+  const daoFeeDestination = onchainEarnConfig?.daoFeeDestination ?? findAta(deployer.publicKey, usdcMint, false);
+
+  // --- basket_vault: EXTERNAL USDC treasury (NOT owned by the EarnConfig PDA) -
+  // The program no longer custodies USDC; basket_vault is an external treasury
+  // token account set via update_config AFTER init. Source precedence:
+  //   1. EARN_BASKET_VAULT — explicit USDC token-account pubkey (used as-is).
+  //   2. EARN_TREASURY     — a wallet; basket_vault = its USDC ATA (idempotent).
+  //   3. default           — a fresh deployer-owned USDC token account (signer),
+  //                          journaled for warm-restart reuse. Owner = deployer,
+  //                          so it stays distinct from the EarnConfig PDA and is
+  //                          NOT the deployer's USDC ATA (= dao_fee_destination).
+  // If EarnConfig already pins a basket_vault, that on-chain value wins.
+  let basketVaultKp: Keypair | null = null; // only set for the default fresh-treasury branch
   let basketVault: PublicKey;
-  if (onchainEarnConfig) {
+  let basketVaultOwner: PublicKey; // deployer or EARN_TREASURY; informational
+  let basketVaultSource: string;
+  if (onchainEarnConfig && !isZeroPubkey(onchainEarnConfig.basketVault)) {
+    // Already configured on-chain (a prior update_config ran): pin to it.
     basketVault = onchainEarnConfig.basketVault;
+    basketVaultOwner = deployer.publicKey; // owner unknowable from config; informational only
+    basketVaultSource = 'on-chain EarnConfig (already set)';
     if (earnSection.basket_vault && earnSection.basket_vault !== basketVault.toBase58()) {
       throw new Error(
         `earn.basket_vault ${earnSection.basket_vault} != on-chain EarnConfig basket_vault ${basketVault.toBase58()}`,
       );
     }
-  } else if (earnSection.basket_vault) {
-    throw new Error(
-      'earn.basket_vault is journaled while EarnConfig is uninitialized; refusing to reuse a public vault address',
-    );
+  } else if (basketVaultOverride) {
+    basketVault = basketVaultOverride;
+    basketVaultOwner = deployer.publicKey; // unknown for an opaque token account; informational
+    basketVaultSource = 'EARN_BASKET_VAULT env (explicit token account)';
+  } else if (treasuryOwnerOverride) {
+    basketVaultOwner = treasuryOwnerOverride;
+    basketVault = findAta(treasuryOwnerOverride, usdcMint, true);
+    basketVaultSource = 'EARN_TREASURY env (treasury wallet USDC ATA)';
+  } else if (earnSection.basket_vault_keypair_b64) {
+    // Warm restart of the default fresh-treasury branch: reuse the journaled
+    // deployer-owned treasury token account.
+    basketVaultKp = keypairFromB64(earnSection.basket_vault_keypair_b64);
+    basketVault = basketVaultKp.publicKey;
+    basketVaultOwner = deployer.publicKey;
+    basketVaultSource = 'journaled deployer-owned treasury token account (reused)';
   } else {
     basketVaultKp = Keypair.generate();
     basketVault = basketVaultKp.publicKey;
+    basketVaultOwner = deployer.publicKey;
+    basketVaultSource = 'fresh deployer-owned treasury token account (generated)';
   }
-  // dao_fee_destination: USDC ATA owned by deployer until EarnConfig exists;
-  // after init, read the actual value from on-chain config because it is
-  // tunable via update_config.
-  const daoFeeDestination = onchainEarnConfig?.daoFeeDestination ?? findAta(deployer.publicKey, usdcMint, false);
+  // Contract invariant: basket_vault MUST differ from dao_fee_destination
+  // (FeeDestinationIsBasketVault). Fail fast with a clear message instead of an
+  // opaque on-chain custom error.
+  if (basketVault.equals(daoFeeDestination)) {
+    throw new Error(
+      `basket_vault ${basketVault.toBase58()} must differ from dao_fee_destination ` +
+        `${daoFeeDestination.toBase58()} (contract rejects FeeDestinationIsBasketVault). ` +
+        'Configure a distinct EARN_BASKET_VAULT / EARN_TREASURY treasury account.',
+    );
+  }
+  if (earnSection.basket_vault && earnSection.basket_vault !== basketVault.toBase58()) {
+    throw new Error(
+      `earn.basket_vault ${earnSection.basket_vault} != resolved basket_vault ${basketVault.toBase58()}`,
+    );
+  }
   // pool_vault: earn-RWT ATA owned by StakingConfig PDA. Before staking init
   // it is the canonical derived ATA; after init, read the pinned on-chain value.
   const canonicalPoolVault = findAta(stakingConfigPda, earnRwtMint, true);
@@ -610,12 +728,18 @@ async function main(): Promise<void> {
   console.log(`earn-RWT mint:        ${earnRwtMint.toBase58()} (auth=earn_config PDA, 6 dec)`);
   console.log(`stRWT mint:           ${strwtMint.toBase58()} (created in-handler, auth=staking_config PDA, 6 dec)`);
   console.log('--- token accounts ---');
-  console.log(`basket_vault (USDC):  ${basketVault.toBase58()} (fresh token account, owner=earn_config PDA)`);
+  console.log(`basket_vault (USDC):  ${basketVault.toBase58()} (EXTERNAL treasury; ${basketVaultSource})`);
+  console.log(`basket_vault owner:   ${basketVaultOwner.toBase58()} (NOT the EarnConfig PDA — program does not custody USDC)`);
   console.log(`dao_fee_dest (USDC):  ${daoFeeDestination.toBase58()} (${onchainEarnConfig ? 'from EarnConfig' : 'owner=deployer'})`);
   console.log(`pool_vault (earn-RWT):${poolVault.toBase58()} (owner=staking_config PDA, create-idempotent in-handler)`);
   console.log('--- init args ---');
   console.log(
-    `earn.initialize:      authority=${deployer.publicKey.toBase58()}`,
+    `earn.initialize:      authority=${deployer.publicKey.toBase58()} (basket_vault set later via update_config)`,
+  );
+  console.log(
+    `earn.update_config:   basket_vault=${basketVault.toBase58()} ` +
+      `mint_fee_bps=${onchainEarnConfig?.mintFeeBps ?? EARN_DEFAULT_MINT_FEE_BPS} ` +
+      `min_mint_amount=${(onchainEarnConfig?.minMintAmount ?? EARN_DEFAULT_MIN_MINT_AMOUNT).toString()}`,
   );
   console.log(
     `staking.initialize:   reward_depositor=${deployer.publicKey.toBase58()} ` +
@@ -675,9 +799,8 @@ async function main(): Promise<void> {
 
   // ========================================================================
   // Step 4 (earn token accounts): dao_fee_destination.
-  // The basket_vault is intentionally NOT created in a standalone tx. It is a
-  // fresh token-account signer and is created atomically with earn.initialize
-  // below, so no public deterministic address can be dusted before init.
+  // basket_vault is no longer an initialize account; it is an EXTERNAL treasury
+  // set via update_config after init (Step 6), so it is NOT created here.
   // dao_fee_destination is an ordinary deployer-owned ATA and is safe to
   // create idempotently ahead of time.
   // ========================================================================
@@ -712,14 +835,16 @@ async function main(): Promise<void> {
 
   // ========================================================================
   // Step 5: earn.initialize
+  // basket_vault is NO LONGER an initialize account (the program does not
+  // custody USDC; config.basket_vault is left zeroed and set via update_config
+  // in Step 6).
   // Account order (1:1 with contracts/earn/src/instructions/initialize.rs):
   //   0 deployer            signer, writable   (mut, signer)
   //   1 earn_config         writable           (manual create after validation)
   //   2 rwt_mint            readonly           (= earn-RWT mint)
   //   3 usdc_mint           readonly           (= devnet USDC)
-  //   4 basket_vault        readonly
-  //   5 dao_fee_destination readonly
-  //   6 system_program      readonly
+  //   4 dao_fee_destination readonly
+  //   5 system_program      readonly
   // ========================================================================
   {
     if (earnConfigExists) {
@@ -744,62 +869,133 @@ async function main(): Promise<void> {
           'un-sent tx (would simulate cleanly once that tx is committed under --execute)',
       );
     } else {
-      const setupIxs: TransactionInstruction[] = [];
-      const signers = [deployer];
-
-      if (await accountExists(conn, basketVault)) {
-        const basketVaultAmount = await readTokenAccountAmount(conn, basketVault);
-        if (basketVaultAmount === null) {
-          throw new Error(`basket_vault ${basketVault.toBase58()} exists but is not a readable token account`);
-        }
-        if (basketVaultAmount !== 0n) {
-          throw new Error(
-            `basket_vault ${basketVault.toBase58()} must be empty before earn.initialize; ` +
-              `found ${basketVaultAmount.toString()} base units`,
-          );
-        }
-        log('basket-vault', 'pre-created vault balance guard OK (amount = 0)');
-      } else {
-        if (!basketVaultKp) {
-          throw new Error('basket_vault keypair unavailable while EarnConfig is uninitialized');
-        }
-        const lamports = await getMinimumBalanceForRentExemptAccount(conn);
-        setupIxs.push(
-          SystemProgram.createAccount({
-            fromPubkey: deployer.publicKey,
-            newAccountPubkey: basketVault,
-            lamports,
-            space: ACCOUNT_SIZE,
-            programId: TOKEN_PROGRAM_ID,
-          }),
-          createInitializeAccountInstruction(
-            basketVault,
-            usdcMint,
-            earnConfigPda,
-            TOKEN_PROGRAM_ID,
-          ),
-        );
-        signers.push(basketVaultKp);
-      }
-
       const keys: AccountMeta[] = [
         meta(deployer.publicKey, true, true),
         meta(earnConfigPda, false, true),
         meta(earnRwtMint, false, false),
         meta(usdcMint, false, false),
-        meta(basketVault, false, false),
         meta(daoFeeDestination, false, false),
         meta(SYSTEM_PROGRAM_ID, false, false),
       ];
       const data = encodeEarnInitializeArgs(deployer.publicKey);
       const ix = new TransactionInstruction({ programId: earnProgramId, keys, data });
-      const tx = new Transaction().add(...setupIxs, ix);
-      await simulateOrSend(conn, tx, signers, execute, 'create basket_vault + earn.initialize');
+      const tx = new Transaction().add(ix);
+      await simulateOrSend(conn, tx, [deployer], execute, 'earn.initialize');
     }
   }
 
   // ========================================================================
-  // Step 6: staking.initialize
+  // Step 6: earn.update_config — SET the external basket_vault.
+  // config.basket_vault is zeroed at init; mint_rwt / add_to_basket revert
+  // BasketVaultNotSet until it is set here. We re-affirm the other tunables at
+  // their current/default values so only basket_vault effectively changes.
+  //
+  // Treasury creation: when the default fresh-treasury branch is used, the
+  // deployer-owned USDC token account is created in the SAME tx (System
+  // CreateAccount + InitializeAccount, owner = deployer). For an EARN_TREASURY
+  // wallet, its USDC ATA is created idempotently. For an explicit
+  // EARN_BASKET_VAULT account, it is assumed to already exist.
+  //
+  // Account order (1:1 with contracts/earn/src/instructions/update_config.rs):
+  //   0 authority     signer            (= deployer = config.authority)
+  //   1 earn_config   writable
+  // basket_vault itself is passed by VALUE in the args, NOT as an account.
+  // ========================================================================
+  {
+    const alreadySet =
+      onchainEarnConfig != null && !isZeroPubkey(onchainEarnConfig.basketVault);
+    if (alreadySet) {
+      log('earn-update-config', `skip (basket_vault already set to ${basketVault.toBase58()})`);
+    } else if (!execute && !earnConfigExists) {
+      // Dry-run limitation: EarnConfig is only created by the prior un-sent
+      // earn.initialize tx, so update_config would fail standalone. Defer.
+      log(
+        'earn-update-config',
+        'DEFERRED in dry-run — depends on EarnConfig created by the prior un-sent ' +
+          'earn.initialize tx (would simulate cleanly once that tx is committed under --execute)',
+      );
+    } else {
+      // Re-affirm current/default tunables; only basket_vault changes.
+      const mintFeeBps = onchainEarnConfig?.mintFeeBps ?? EARN_DEFAULT_MINT_FEE_BPS;
+      const minMintAmount = onchainEarnConfig?.minMintAmount ?? EARN_DEFAULT_MIN_MINT_AMOUNT;
+
+      // Create the treasury account in the same tx when needed.
+      const setupIxs: TransactionInstruction[] = [];
+      const signers = [deployer];
+      if (basketVaultKp) {
+        // Default branch: fresh deployer-owned USDC token account (NOT an ATA,
+        // NOT the EarnConfig PDA, NOT the deployer's dao_fee ATA).
+        if (!(await accountExists(conn, basketVault))) {
+          const lamports = await getMinimumBalanceForRentExemptAccount(conn);
+          setupIxs.push(
+            SystemProgram.createAccount({
+              fromPubkey: deployer.publicKey,
+              newAccountPubkey: basketVault,
+              lamports,
+              space: ACCOUNT_SIZE,
+              programId: TOKEN_PROGRAM_ID,
+            }),
+            createInitializeAccountInstruction(
+              basketVault,
+              usdcMint,
+              deployer.publicKey, // owner = deployer (external to the EarnConfig PDA)
+              TOKEN_PROGRAM_ID,
+            ),
+          );
+          signers.push(basketVaultKp);
+        } else {
+          log('earn-treasury', 'skip create (journaled treasury token account exists)');
+        }
+      } else if (treasuryOwnerOverride) {
+        // EARN_TREASURY: ensure the treasury wallet's USDC ATA exists.
+        if (!(await accountExists(conn, basketVault))) {
+          setupIxs.push(
+            createAssociatedTokenAccountIdempotentInstruction(
+              deployer.publicKey,
+              basketVault,
+              treasuryOwnerOverride, // owner
+              usdcMint,
+              TOKEN_PROGRAM_ID,
+              ASSOCIATED_TOKEN_PROGRAM_ID,
+            ),
+          );
+        } else {
+          log('earn-treasury', 'skip create (EARN_TREASURY USDC ATA exists)');
+        }
+      } else {
+        // EARN_BASKET_VAULT: explicit token account, assumed to already exist.
+        if (execute && !(await accountExists(conn, basketVault))) {
+          throw new Error(
+            `EARN_BASKET_VAULT ${basketVault.toBase58()} does not exist on-chain; ` +
+              'create the treasury token account first or use EARN_TREASURY.',
+          );
+        }
+      }
+
+      const keys: AccountMeta[] = [
+        meta(deployer.publicKey, true, false),
+        meta(earnConfigPda, false, true),
+      ];
+      const data = encodeEarnUpdateConfigArgs(
+        mintFeeBps,
+        minMintAmount,
+        daoFeeDestination,
+        basketVault,
+      );
+      const ix = new TransactionInstruction({ programId: earnProgramId, keys, data });
+      const tx = new Transaction().add(...setupIxs, ix);
+      await simulateOrSend(
+        conn,
+        tx,
+        signers,
+        execute,
+        'earn.update_config (set basket_vault)',
+      );
+    }
+  }
+
+  // ========================================================================
+  // Step 7: staking.initialize
   // The handler CREATES strwt_mint (System CreateAccount + Token
   // InitializeMint2) and creates/accepts pool_vault (ATA CreateIdempotent CPI)
   // internally. So:
@@ -865,11 +1061,12 @@ async function main(): Promise<void> {
   }
 
   // ========================================================================
-  // Step 7: Journal everything into data/devnet-addresses.json
+  // Step 8: Journal everything into data/devnet-addresses.json
   // ========================================================================
   earnSection.earn_rwt_mint = earnRwtMint.toBase58();
   earnSection.strwt_mint = strwtMint.toBase58();
   earnSection.basket_vault = basketVault.toBase58();
+  earnSection.basket_vault_owner = basketVaultOwner.toBase58();
   earnSection.dao_fee_destination = daoFeeDestination.toBase58();
   earnSection.pool_vault = poolVault.toBase58();
   earnSection.earn_config_pda = earnConfigPda.toBase58();
@@ -884,7 +1081,14 @@ async function main(): Promise<void> {
   } else {
     delete earnSection.strwt_mint_keypair_b64;
   }
-  delete (earnSection as EarnSection & { basket_vault_keypair_b64?: string }).basket_vault_keypair_b64;
+  // Journal the default-treasury keypair only when the script generated/owns it
+  // (fresh deployer-owned treasury account); drop it when an external treasury
+  // is configured via env so no stale secret lingers.
+  if (basketVaultKp) {
+    earnSection.basket_vault_keypair_b64 = keypairToB64(basketVaultKp);
+  } else {
+    delete earnSection.basket_vault_keypair_b64;
+  }
 
   if (execute) {
     earnSection.bootstrapped_at = new Date().toISOString();
@@ -896,6 +1100,7 @@ async function main(): Promise<void> {
       earn_rwt_mint: earnSection.earn_rwt_mint,
       strwt_mint: earnSection.strwt_mint,
       basket_vault: earnSection.basket_vault,
+      basket_vault_owner: earnSection.basket_vault_owner,
       dao_fee_destination: earnSection.dao_fee_destination,
       pool_vault: earnSection.pool_vault,
       earn_config_pda: earnSection.earn_config_pda,

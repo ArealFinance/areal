@@ -111,10 +111,16 @@ export interface EarnUpdateConfigArgs {
   minMint: bigint;
   /** dao_fee_destination ([u8;32]). */
   feeDestination: PublicKey;
+  /**
+   * basket_vault ([u8;32]). External USDC treasury token account (the program
+   * does NOT custody USDC). Rejected on-chain if zero (ZeroBasketVault) or
+   * equal to dao_fee_destination (FeeDestinationIsBasketVault).
+   */
+  basketVault: PublicKey;
 }
 
 /**
- * earn.update_config(mint_fee_bps: u16, min_mint_amount: u64, dao_fee_destination: [u8;32]).
+ * earn.update_config(mint_fee_bps: u16, min_mint_amount: u64, dao_fee_destination: [u8;32], basket_vault: [u8;32]).
  * Accounts (contracts/earn/src/instructions/update_config.rs):
  *   0 authority   signer            -> VAULT PDA
  *   1 earn_config mut
@@ -130,6 +136,7 @@ export function buildEarnUpdateConfig(
     u16le(args.feeBps),
     u64le(args.minMint),
     pubkey32(args.feeDestination),
+    pubkey32(args.basketVault),
   ]);
   const keys: AccountMeta[] = [meta(vault, true, false), meta(earnConfig, false, true)];
   return new TransactionInstruction({ programId: earnProgram, keys, data });
@@ -472,6 +479,9 @@ export function decodeInstruction(
         const feeBps = readU16(data, 8);
         const minMint = readU64(data, 10);
         const feeDest = readPubkey(data, 18);
+        // basket_vault is appended last (Borsh order: u16, u64, [u8;32], [u8;32]).
+        // Offset 50 = 8 disc + 2 fee + 8 min + 32 dao_fee_destination.
+        const basketVault = readPubkey(data, 50);
         const { accounts, verified } = labelAndVerifyAccounts(
           metas,
           ['authority (vault)', 'earn_config'],
@@ -487,6 +497,7 @@ export function decodeInstruction(
             { name: 'mint_fee_bps', value: `${feeBps} (${(feeBps / 100).toFixed(2)}%)` },
             { name: 'min_mint_amount', value: minMint.toString() },
             { name: 'dao_fee_destination', value: feeDest.toBase58() },
+            { name: 'basket_vault', value: basketVault.toBase58() },
           ],
           accounts,
           rawDataHex: hex,

@@ -257,21 +257,23 @@ async function withProposeContext(): Promise<{ cfg: ResolvedConfig; conn: Connec
 
 propose
   .command('earn-update-config')
-  .description('earn.update_config(fee_bps, min_mint, fee_destination)')
+  .description('earn.update_config(fee_bps, min_mint, fee_destination, basket_vault)')
   .requiredOption('--keypair <path>', 'proposer keypair file (Initiate permission)')
   .requiredOption('--fee-bps <n>', 'mint_fee_bps (u16, <=1000 enforced on-chain)')
   .requiredOption('--min-mint <n>', 'min_mint_amount (u64, USDC base units)')
   .requiredOption('--fee-destination <pubkey>', 'dao_fee_destination')
+  .requiredOption('--basket-vault <pubkey>', 'basket_vault (external USDC treasury; must differ from fee_destination)')
   .action(async (opts) => {
     const { cfg, conn } = await withProposeContext();
     const feeBps = reqU16(opts.feeBps, '--fee-bps');
     const minMint = reqU64(opts.minMint, '--min-mint');
     const feeDestination = reqPubkey(opts.feeDestination, '--fee-destination');
+    const basketVault = reqPubkey(opts.basketVault, '--basket-vault');
     await proposeAndReport(
       cfg,
       conn,
       opts.keypair,
-      (vault) => [buildEarnUpdateConfig(cfg.programs.earn, vault, cfg.configPdas.earnConfig, { feeBps, minMint, feeDestination })],
+      (vault) => [buildEarnUpdateConfig(cfg.programs.earn, vault, cfg.configPdas.earnConfig, { feeBps, minMint, feeDestination, basketVault })],
       'earn-update-config',
     );
   });
