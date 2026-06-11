@@ -3,8 +3,8 @@
  * Read-only. Prints every field used to verify Stage 3 scenarios.
  *
  * Byte layouts (8-byte Anchor discriminator prefix):
- *   EarnConfig (228 bytes) — contracts/earn/src/state.rs
- *   StakingConfig (234 bytes) — contracts/staking/src/state.rs
+ *   EarnConfig (357 bytes) — contracts/earn/src/state.rs
+ *   StakingConfig (363 bytes) — contracts/staking/src/state.rs
  */
 import { Connection, PublicKey } from '@solana/web3.js';
 
