@@ -4,13 +4,14 @@
 #
 # Grep-based pre-publication audit. For each of the 5 public submodules
 # (contracts, bots, app, dashboard, docs) plus the meta-repo top-level,
-# enforce 4 gates:
+# enforce 5 gates:
 #
 #   Gate 1: No `plan/layer-*` references — internal planning is private.
 #   Gate 2: No AI / Claude / co-author markers.
 #   Gate 5: No tracked `.env` files outside `.gitignore` coverage.
 #   Gate 6: No hardcoded RPC URLs (https://api.{devnet,mainnet}.solana.com)
 #           outside `*.example`, `*.md`, `bots/.e2e/fixtures/`.
+#   Gate 7: earn/staking non-devnet deployment pins are not zero placeholders.
 #
 # Exit 0 if every gate passes for every submodule. Tab-formatted per-gate
 # per-submodule status line so output is easy to skim.
@@ -182,6 +183,16 @@ for target in "${TARGETS[@]}"; do
   fi
 
 done
+
+# ----- Gate 7: earn/staking release pins -----
+release_gate_err=""
+if release_gate_err="$(node "$ROOT_DIR/scripts/check-earn-staking-release-readiness.mjs" 2>&1 >/dev/null)"; then
+  printf '%s\t%s\tPASS\n' "areal-meta" "gate7_earn_staking_release_pins"
+else
+  printf '%s\t%s\tFAIL\tsee stderr\n' "areal-meta" "gate7_earn_staking_release_pins"
+  printf '%s\n' "$release_gate_err" | sed 's|^|  areal-meta: |' >&2
+  failures=$((failures + 1))
+fi
 
 echo
 if (( failures > 0 )); then

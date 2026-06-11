@@ -1,0 +1,19 @@
+name: Earn/Staking Release Readiness
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+      - 'release-*'
+
+jobs:
+  earn-staking-release-readiness:
+    name: earn/staking release pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Check earn/staking release pins
+        run: npm run earn-staking:release-check

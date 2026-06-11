@@ -23,7 +23,8 @@ zero remaining deployer authority.
 |---|---|
 | `scripts/verify-deployment.sh` | 6-check cross-contract security audit. Verifies authority chain, R20 mint pin, bot fleet liveness, IDL parity, vanity ID drift, and config invariants. Emits `data/layer-10-audit-<UTC>.json` with structured per-check verdicts. |
 | `scripts/verify-fresh-deploy.sh` | Full reproducibility runner. Kills any running validator, wipes the ledger, runs `deploy.sh` end-to-end, executes the master E2E suite, and re-runs `verify-deployment.sh`. `--keep-ledger` flag short-circuits the wipe for re-runs against an already-deployed validator. |
-| `scripts/check-public-repo-readiness.sh` | Pre-tag grep gates for public repo hygiene. Gate 1 — no internal-planning path references; Gate 2 — no AI assistant attribution markers; Gate 5 — no `.env` files staged; Gate 6 — no leaked RPC URLs. Exits non-zero on any gate failure; intended to run as a pre-tag CI hook. |
+| `scripts/check-public-repo-readiness.sh` | Pre-tag grep gates for public repo hygiene. Gate 1 — no internal-planning path references; Gate 2 — no AI assistant attribution markers; Gate 5 — no `.env` files staged; Gate 6 — no leaked RPC URLs; Gate 7 — earn/staking release pins are nonzero. Exits non-zero on any gate failure; intended to run as a pre-tag CI hook. |
+| `node scripts/check-earn-staking-release-readiness.mjs` | Local release gate for the earn/staking pair. Fails while non-devnet `BOOTSTRAP_AUTHORITY` / `EARN_RWT_MINT` pins are still zero placeholders. Also runs from the manual/tagged Earn/Staking Release Readiness GitHub workflow. This does not replace external audit or live deployment verification. |
 
 | Script | Purpose |
 |---|---|

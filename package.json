@@ -19,6 +19,7 @@
     "earn:dev": "npm --prefix app-earn run dev",
     "earn:build": "npm --prefix app-earn run build",
     "earn:check": "npm --prefix app-earn run check",
+    "earn-staking:release-check": "node scripts/check-earn-staking-release-readiness.mjs",
     "bot:merkle": "npm --prefix bots run merkle:start",
     "bot:rebalancer": "npm --prefix bots run rebalancer:start"
   }
