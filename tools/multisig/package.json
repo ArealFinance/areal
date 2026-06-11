@@ -1,0 +1,36 @@
+{
+  "name": "areal-msig",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-contained CLI for creating, approving and executing Areal Finance protocol operations through a Squads v4 multisig.",
+  "type": "module",
+  "bin": {
+    "msig": "./dist/index.js"
+  },
+  "scripts": {
+    "msig": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "comments": {
+    "overrides.rpc-websockets": "Pinned to 7.5.1 because @solana/web3.js 1.91.8 expects the v7 API; newer rpc-websockets (8.x) breaks the WebSocket export and crashes Connection setup on Node 20. See project-squads-web3-rpc-websockets memory."
+  },
+  "overrides": {
+    "rpc-websockets": "7.5.1"
+  },
+  "dependencies": {
+    "@solana/web3.js": "1.91.8",
+    "@sqds/multisig": "^2.1.4",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
