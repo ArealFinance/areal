@@ -22,7 +22,7 @@
 - [x] **earn program ID** = `GTASb5UcQEkcRWuMwfoNABBBNJitdxWByobMLZZ2UCw8` (`keys/mainnet/earn-program.json`, random/non-vanity, gitignored).
 - [x] **staking program ID** = `9tEKvDwkqkveBvmQfEzgPKWSNCDTGSSqYz4ZE6pP5DGY` (`keys/mainnet/staking-program.json`).
 - [x] **deployer pubkey** = `BOOTSTRAP_AUTHORITY` = `CyFCB88B3kMiPJSFLSXqP1u12dULeBaPh9qqjqquA1Np` (keypair `keys/mainnet/deployer.json`, gitignored, chmod 600). One-time bootstrap key; god-mode DURING bootstrap only, inert after handover. **BACK UP THE FILE — it is NOT in git; a disk loss loses the key.**
-- [ ] **genesis recipient** = treasury's earn-RWT ATA (the wallet that holds the founder genesis allocation). *(decide: deployer or multisig-owned)*
+- [x] **genesis recipient** = `GoiuMiTocoY5M3NuRrcJDJ25AjruPieRZitvnEkCFtR9` (the multisig vault's RWT ATA — treasury holds the founder allocation; created idempotently at bootstrap).
 - [x] **dao_fee_destination** = `68AHfVCW4CJGCKxfUdLgj3WKe8qF8eSztmEd7VnPFYkg` (deployer's USDC ATA, ≠ basket_vault). TEMPORARY — multisig redirects post-launch via update_config.
 
 ## Phase 0 — Pins + build (mainnet, NOT --features devnet)

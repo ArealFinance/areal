@@ -4,11 +4,11 @@ Status legend: ☐ open · ◐ in progress · ☑ done
 
 ## A. Hard blockers (mechanical — code can't deploy without these)
 
-- ☐ **A1** Mainnet program IDs (earn + staking) — vanity grind. *(needs: user provides, or generate)*
+- ☑ **A1** Mainnet program IDs — earn `GTASb5UcQEkcRWuMwfoNABBBNJitdxWByobMLZZ2UCw8`, staking `9tEKvDwkqkveBvmQfEzgPKWSNCDTGSSqYz4ZE6pP5DGY` (`keys/mainnet/{earn,staking}-program.json`, random). RWT mint `RWTeFt9…` + stRWT `sRWTy1…` (vanity, provided).
 - ☑ **A2** Mainnet deployer = `CyFCB88B3kMiPJSFLSXqP1u12dULeBaPh9qqjqquA1Np` (`keys/mainnet/deployer.json`, gitignored, 600). = BOOTSTRAP_AUTHORITY. dao_fee ATA = `68AHfVCW4CJGCKxfUdLgj3WKe8qF8eSztmEd7VnPFYkg`. **MUST back up the keypair file (not in git).**
-- ☐ **A3** Pin batch (non-devnet branches): `declare_id!` → real IDs; `USDC_MINT` → mainnet `EPjFWdd5…` (refactor to feature-gated devnet/mainnet); `EARN_RWT_MINT` (staking) → mint from bootstrap (chicken-egg); `BOOTSTRAP_AUTHORITY` → deployer. *(blocked by A1, A2)*
+- ☑ **A3** Pin batch DONE + committed (contracts `1861487`). declare_id, USDC feature-gated (devnet/mainnet), EARN_RWT_MINT, BOOTSTRAP_AUTHORITY all pinned in non-devnet; devnet branches intact. Security: every byte independently verified, RELEASE-READY. Bootstrap made vanity-mint-configurable.
 - ☑ **A4** `basket_vault` = `Ew8GFA29…` (multisig USDC ATA, = invested capital). `dao_fee_destination` = the DEPLOYER's USDC ATA (created at bootstrap), TEMPORARY — collects fees until the multisig redirects it via `update_config` post-launch. Contract-compliant (≠ basket_vault, USDC, non-zero). OP-NOTE: keep the deployer key until dao_fee is redirected + accumulated fees swept (deployer owns that account).
-- ☐ **A5** Genesis recipient = treasury earn-RWT ATA. *(derived at bootstrap)*
+- ☑ **A5** Genesis recipient = `GoiuMiTocoY5M3NuRrcJDJ25AjruPieRZitvnEkCFtR9` (multisig vault RWT ATA; created at bootstrap). 25k RWT → treasury, NAV $1.
 
 ## B. Verification & audit (my work)
 
@@ -18,7 +18,7 @@ Status legend: ☐ open · ◐ in progress · ☑ done
 ## C. Launch dependencies (outside the contracts, but launch-blocking)
 
 - ☐ **C1** Mainnet Meteora earn-RWT/USDC pool — earn has NO on-chain redeem; exit = DEX. Mint doesn't exist until bootstrap → pool is created + seeded AFTER the RWT mint. Must be in the launch sequence (create mint → seed pool → enable minting via update_config).
-- ☐ **C2** Verify multisig `ApDQBVjwy47EAffSehF8k18orUbJaLSURVEdx95bV8oA` — threshold + members (2-of-N), genuinely a Squads multisig, not a single key. *(security rests entirely on this)*
+- ☑ **C2** VERIFIED on-chain. Squads multisig account `C3mC9bMpSnu3eKqX7MBB1GcxNVgTvbDSZG7iQc91sW2B` = **2-of-3**, all 3 members full perms, timeLock=0. vault[0] derives to `ApDQBVjwy…` = our authority/treasury (MATCH). NOT a single key. (Multisig acct = CLI/settings only; vault = assets/authority, per Squads.) timeLock=0 → relevant to D2.
 - ☐ **C3** Backend + frontend repointed to mainnet program IDs + mainnet basket_vault/config (currently devnet `HGh7`).
 
 ## D. Risk mitigations (no external audit — recommended substitutes)
