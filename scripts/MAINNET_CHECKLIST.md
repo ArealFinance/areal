@@ -30,7 +30,7 @@ Status legend: ☐ open · ◐ in progress · ☑ done
 
 ## E. Execution
 
-- ☑ **E1** DONE (v5 rehearsal). Full flow re-proven on pinned build; the provided-vanity-mint-keypair path VALIDATED (mint created at exact provided address). Found + FIXED a mainnet-blocker: off-curve genesis recipient (bootstrap allowOwnerOffCurve false→true; verified ATA==GoiuMiTo, off-curve mint proven on devnet). Committed meta `9035977`.
+- ☑ **E1** DONE. v5 proved the flow + vanity-mint-from-file, found the off-curve-genesis bug (fixed, meta `9035977`). **v6 CLEAN re-run of the EXACT committed code PASSED end-to-end** — genesis 25k minted to the OFF-CURVE vault ATA (owner=GkDVox, no error), vanity mint at exact addr, authority+upgrade→vault, NAV $1. No workarounds, no open blockers. Final gate cleared.
 - ☐ **E2** Mainnet deploy per `scripts/MAINNET_RUNBOOK.md`, with one pre-flight config confirmation before irreversible steps.
 
 ---
