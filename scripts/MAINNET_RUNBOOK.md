@@ -46,14 +46,24 @@ Build: `cargo build-sbf --manifest-path earn/Cargo.toml` and `… staking/Cargo.
 3. `solana program deploy staking.so --program-id <staking-keypair> --keypair <deployer> --url mainnet-beta`
    (deployer is the upgrade authority initially.)
 4. `earn.initialize(authority = <deployer>)`
-5. `earn.seed_genesis(amount = 25000000000, recipient = <treasury earn-RWT ATA>)`
+5. `earn.seed_genesis(amount = 25000000000)` → recipient = the genesis wallet's
+   earn-RWT ATA, derived by the script (allowOwnerOffCurve = true).
    → supply 25k, capital 25k, **NAV = $1.00**, genesis RWT minted to the treasury. *(one-time, supply==0)*
 6. `earn.update_config(mint_fee_bps, min_mint_amount, dao_fee_destination, basket_vault = Ew8GFA29…)`
    → enables user minting. **basket_vault ≠ dao_fee_destination** (contract rejects equality).
 7. `staking.initialize(…)`
 
-   (`scripts/lib/bootstrap-earn.ts` performs 4–7; env: `EARN_GENESIS_RWT=25000000000`,
-   `EARN_GENESIS_RECIPIENT=<treasury>`, `EARN_BASKET_VAULT=Ew8GFA29…`.)
+   (`scripts/lib/bootstrap-earn.ts` performs 4–7. Env:
+   ```
+   EARN_GENESIS_RWT=25000000000
+   EARN_GENESIS_RECIPIENT=ApDQBVjwy47EAffSehF8k18orUbJaLSURVEdx95bV8oA  # multisig VAULT WALLET (off-curve PDA); the script derives its earn-RWT ATA GoiuMiTo… — pass the WALLET, NOT the ATA
+   EARN_RWT_MINT_KEYPAIR=keys/mainnet/rwt-mint.json    # vanity earn-RWT mint (v5)
+   STRWT_MINT_KEYPAIR=keys/mainnet/strwt-mint.json     # vanity stRWT mint (v5)
+   EARN_BASKET_VAULT=Ew8GFA29zsUXzf8dmDmesbHVCSfXVAVnPWYtr9nF3sqo
+   ```
+   Note: `EARN_GENESIS_RECIPIENT` is the multisig vault WALLET (an off-curve PDA).
+   The script derives + idempotently creates its earn-RWT ATA `GoiuMiTo…` with
+   `allowOwnerOffCurve = true`. Do NOT pass the ATA itself.)
 
 ## Phase 2 — Handover to the multisig
 

@@ -851,12 +851,15 @@ async function main(): Promise<void> {
   }
 
   // --- genesis seed recipient (earn.seed_genesis) --------------------------
-  // The genesis mint lands in the treasury wallet's earn-RWT ATA. The treasury
-  // wallet defaults to the deployer (EARN_GENESIS_RECIPIENT overrides it). The
-  // ATA is an on-curve wallet ATA, so allowOwnerOffCurve = false.
+  // The genesis mint lands in the recipient wallet's earn-RWT ATA. The recipient
+  // wallet defaults to the deployer (EARN_GENESIS_RECIPIENT overrides it). On
+  // mainnet the recipient is the Squads multisig VAULT WALLET, which is an
+  // OFF-CURVE PDA — so allowOwnerOffCurve MUST be true (a superset that also
+  // keeps on-curve wallets like the deployer working). Mirrors the EARN_TREASURY
+  // basket_vault path, which derives its ATA with allowOwnerOffCurve = true.
   const genesisEnabled = genesisAmount > 0n;
   const genesisRecipientWallet = genesisRecipientOwner ?? deployer.publicKey;
-  const genesisRecipientAta = findAta(genesisRecipientWallet, earnRwtMint, false);
+  const genesisRecipientAta = findAta(genesisRecipientWallet, earnRwtMint, true);
 
   // --- Plan print ----------------------------------------------------------
   console.log('\n================ bootstrap-earn PLAN ================');
