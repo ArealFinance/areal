@@ -538,6 +538,14 @@ interface Cli {
   // is created idempotently. Set via EARN_GENESIS_RECIPIENT; defaults to the
   // deployer when unset.
   genesisRecipientOwner: PublicKey | null;
+  // Optional pre-provisioned mint keypairs. When EARN_RWT_MINT_KEYPAIR /
+  // STRWT_MINT_KEYPAIR point to a keypair file, that exact keypair is used to
+  // create the mint (mainnet uses the vanity mints under keys/mainnet/). When
+  // unset, the script generates a fresh keypair (devnet default). On a warm
+  // restart the journaled `*_keypair_b64` / on-chain config still take
+  // precedence over these — they only seed the cold-start case.
+  earnRwtMintKeypair: Keypair | null;
+  strwtMintKeypair: Keypair | null;
 }
 
 function parseArgs(argv: string[]): Cli {
@@ -580,12 +588,25 @@ function parseArgs(argv: string[]): Cli {
     ? new PublicKey(process.env.EARN_GENESIS_RECIPIENT)
     : null;
 
+  // Optional mint keypair files (mainnet vanity mints). Each, when set, must
+  // point at a Solana keypair JSON (the same format as the deployer keypair).
+  // The mint is then created at that exact (vanity) address. Unset ⇒ fresh
+  // keypair generated downstream (devnet default).
+  const earnRwtMintKeypair = process.env.EARN_RWT_MINT_KEYPAIR
+    ? loadKeypair(process.env.EARN_RWT_MINT_KEYPAIR)
+    : null;
+  const strwtMintKeypair = process.env.STRWT_MINT_KEYPAIR
+    ? loadKeypair(process.env.STRWT_MINT_KEYPAIR)
+    : null;
+
   return {
     execute,
     basketVaultOverride,
     treasuryOwnerOverride,
     genesisAmount,
     genesisRecipientOwner,
+    earnRwtMintKeypair,
+    strwtMintKeypair,
   };
 }
 
@@ -596,6 +617,8 @@ async function main(): Promise<void> {
     treasuryOwnerOverride,
     genesisAmount,
     genesisRecipientOwner,
+    earnRwtMintKeypair,
+    strwtMintKeypair,
   } = parseArgs(process.argv.slice(2));
 
   const art = loadAddresses();
@@ -677,9 +700,24 @@ async function main(): Promise<void> {
       earnRwtMintKp = journalMintKp;
     }
   } else if (earnSection.earn_rwt_mint_keypair_b64) {
+    // Warm restart: reuse the journaled mint keypair. If an env keypair is also
+    // provided, it MUST match (otherwise we'd silently ignore the requested
+    // vanity mint).
     earnRwtMintKp = keypairFromB64(earnSection.earn_rwt_mint_keypair_b64);
     earnRwtMint = earnRwtMintKp.publicKey;
+    if (earnRwtMintKeypair && !earnRwtMintKeypair.publicKey.equals(earnRwtMint)) {
+      throw new Error(
+        `EARN_RWT_MINT_KEYPAIR ${earnRwtMintKeypair.publicKey.toBase58()} != journaled ` +
+          `earn-RWT mint ${earnRwtMint.toBase58()} (clear the journal to switch mints)`,
+      );
+    }
+  } else if (earnRwtMintKeypair) {
+    // Cold start with a pre-provisioned mint keypair (e.g. mainnet vanity mint
+    // keys/mainnet/rwt-mint.json). Create the mint at that exact address.
+    earnRwtMintKp = earnRwtMintKeypair;
+    earnRwtMint = earnRwtMintKp.publicKey;
   } else {
+    // Cold start, no override: generate a fresh mint (devnet default).
     earnRwtMintKp = Keypair.generate();
     earnRwtMint = earnRwtMintKp.publicKey;
   }
@@ -709,9 +747,24 @@ async function main(): Promise<void> {
       strwtMintKp = journalStrwtMintKp;
     }
   } else if (earnSection.strwt_mint_keypair_b64) {
+    // Warm restart: reuse the journaled stRWT mint keypair. An env keypair, if
+    // provided, MUST match.
     strwtMintKp = keypairFromB64(earnSection.strwt_mint_keypair_b64);
     strwtMint = strwtMintKp.publicKey;
+    if (strwtMintKeypair && !strwtMintKeypair.publicKey.equals(strwtMint)) {
+      throw new Error(
+        `STRWT_MINT_KEYPAIR ${strwtMintKeypair.publicKey.toBase58()} != journaled ` +
+          `stRWT mint ${strwtMint.toBase58()} (clear the journal to switch mints)`,
+      );
+    }
+  } else if (strwtMintKeypair) {
+    // Cold start with a pre-provisioned stRWT mint keypair (e.g. mainnet vanity
+    // mint keys/mainnet/strwt-mint.json). staking.initialize creates the mint
+    // at this exact address (it co-signs with this keypair).
+    strwtMintKp = strwtMintKeypair;
+    strwtMint = strwtMintKp.publicKey;
   } else {
+    // Cold start, no override: generate a fresh stRWT mint (devnet default).
     strwtMintKp = Keypair.generate();
     strwtMint = strwtMintKp.publicKey;
   }
