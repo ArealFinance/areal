@@ -19,7 +19,7 @@ Status legend: ☐ open · ◐ in progress · ☑ done
 
 - ☐ **C1** Mainnet Meteora earn-RWT/USDC pool — earn has NO on-chain redeem; exit = DEX. Mint doesn't exist until bootstrap → pool is created + seeded AFTER the RWT mint. Must be in the launch sequence (create mint → seed pool → enable minting via update_config).
 - ☑ **C2** VERIFIED on-chain. Squads multisig account `C3mC9bMpSnu3eKqX7MBB1GcxNVgTvbDSZG7iQc91sW2B` = **2-of-3**, all 3 members full perms, timeLock=0. vault[0] derives to `ApDQBVjwy…` = our authority/treasury (MATCH). NOT a single key. (Multisig acct = CLI/settings only; vault = assets/authority, per Squads.) timeLock=0 → relevant to D2.
-- ☐ **C3** Backend + frontend repointed to mainnet program IDs + mainnet basket_vault/config (currently devnet `HGh7`).
+- ☑ **C3** DONE. Backend cluster-aware (SOLANA_CLUSTER=mainnet + program-id env; gate accepts mainnet IDs; keeper never signs off devnet). app-earn network-driven (VITE_NETWORK=mainnet). Meteora pool env-driven placeholder (set at C1). Committed: backend `8b41875`, app-earn `bbb8257`.
 
 ## D. Risk mitigations (no external audit — recommended substitutes)
 
@@ -30,7 +30,7 @@ Status legend: ☐ open · ◐ in progress · ☑ done
 
 ## E. Execution
 
-- ☐ **E1** Final devnet rehearsal of the EXACT frozen mainnet build (re-run the v4 flow on the pinned final version).
+- ☑ **E1** DONE (v5 rehearsal). Full flow re-proven on pinned build; the provided-vanity-mint-keypair path VALIDATED (mint created at exact provided address). Found + FIXED a mainnet-blocker: off-curve genesis recipient (bootstrap allowOwnerOffCurve false→true; verified ATA==GoiuMiTo, off-curve mint proven on devnet). Committed meta `9035977`.
 - ☐ **E2** Mainnet deploy per `scripts/MAINNET_RUNBOOK.md`, with one pre-flight config confirmation before irreversible steps.
 
 ---
