@@ -1,7 +1,7 @@
 node_modules/
 dist/
 # Local operator config + any keypairs must never be committed.
-msig.config.json
+msig.config*.json
 *.keypair.json
 id.json
 # Dry-run state holds the multisig createKey secret + throwaway key refs.

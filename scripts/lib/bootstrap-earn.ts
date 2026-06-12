@@ -622,8 +622,15 @@ async function main(): Promise<void> {
   } = parseArgs(process.argv.slice(2));
 
   const art = loadAddresses();
-  if (art.cluster !== 'devnet' || !art.rpc.http.includes('devnet')) {
-    throw new Error(`refusing to run on non-devnet target (cluster=${art.cluster})`);
+  // Cluster/RPC must be internally consistent — run only on devnet-with-devnet-RPC
+  // or mainnet-beta-with-mainnet-RPC. A mismatch (e.g. mainnet cluster + devnet RPC)
+  // is refused, preventing an accidental cross-cluster bootstrap.
+  const onDevnet = art.cluster === 'devnet' && art.rpc.http.includes('devnet');
+  const onMainnet = art.cluster === 'mainnet-beta' && art.rpc.http.includes('mainnet');
+  if (!onDevnet && !onMainnet) {
+    throw new Error(
+      `refusing to run: cluster/RPC mismatch (cluster=${art.cluster}, rpc must match the cluster)`,
+    );
   }
 
   const rpcUrl = art.rpc.http;
