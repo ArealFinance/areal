@@ -6,3 +6,7 @@ msig.config*.json
 id.json
 # Dry-run state holds the multisig createKey secret + throwaway key refs.
 dryrun-state.json
+# Local backups (may carry RPC keys / throwaway state).
+*.bak
+# Devnet-rehearsal propose scripts hardcode an RPC key — keep local only.
+scripts/propose-authority-transfer-v*.ts

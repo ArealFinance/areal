@@ -1,0 +1,17 @@
+{
+  "name": "Staked RWT",
+  "symbol": "STRWT",
+  "description": "Staked Real World Token by Areal Finance.",
+  "image": "https://meta.areal.finance/strwt.png",
+  "external_url": "https://areal.finance",
+  "extensions": {
+    "website": "https://areal.finance",
+    "twitter": "https://x.com/Areal_Finance"
+  },
+  "properties": {
+    "files": [
+      { "uri": "https://meta.areal.finance/strwt.png", "type": "image/png" }
+    ],
+    "category": "image"
+  }
+}

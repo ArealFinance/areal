@@ -1,0 +1,17 @@
+{
+  "name": "Real World Token",
+  "symbol": "RWT",
+  "description": "Real World Token by Areal Finance.",
+  "image": "https://meta.areal.finance/rwt.png",
+  "external_url": "https://areal.finance",
+  "extensions": {
+    "website": "https://areal.finance",
+    "twitter": "https://x.com/Areal_Finance"
+  },
+  "properties": {
+    "files": [
+      { "uri": "https://meta.areal.finance/rwt.png", "type": "image/png" }
+    ],
+    "category": "image"
+  }
+}
